@@ -1,0 +1,37 @@
+# Runtime dependencies for Surveyor.
+#   pip install -r requirements.txt
+#
+# Kept in sync with [project.dependencies] in pyproject.toml. Installing the
+# package itself (`pip install .`) pulls the same set and also creates the
+# `surveyor` command, which is the recommended route.
+
+# HTTP client for the arXiv API, e-print downloads and the LLM endpoint.
+httpx>=0.27
+# Typed models for papers, notes, taxonomies and configuration.
+pydantic>=2.6
+# Command line interface.
+typer>=0.12
+# Tables, Markdown rendering and progress output in the terminal.
+rich>=13.0
+# Reads .env so API keys stay out of config.toml.
+python-dotenv>=1.0
+
+# --- The app (`surveyor gui`) and the chat bots (`surveyor serve`) ---
+# Local web server for the browser app and for Feishu/WeCom webhooks.
+fastapi>=0.110
+uvicorn>=0.29
+# Renders the Markdown notes as HTML in the browser.
+markdown-it-py>=3.0
+# AES-CBC decryption of Feishu/WeCom callbacks.
+cryptography>=42.0
+
+# --- Optional: a bot over a long connection, no public URL needed ---
+# Only each platform's official SDK can hold that connection open. Left out of the
+# default set because they pull their own HTTP and crypto stacks, and the webhook
+# route needs neither. Install with `pip install .[feishu]` or `.[wecom]`, or
+# uncomment the line you want.
+#
+# `surveyor feishu-connect`:
+# lark-oapi>=1.7
+# `surveyor wecom-connect` (the 智能机器人 route):
+# wecom-aibot-python-sdk>=1.0.2

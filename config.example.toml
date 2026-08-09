@@ -1,0 +1,64 @@
+# Example configuration.
+#
+# You do not need this file. The Settings page in `surveyor gui` writes a real
+# config.toml into your library folder for you. It is here for anyone who would
+# rather set things up by hand, or script a deployment.
+#
+# Copy it into your library folder as config.toml and edit. Secrets never live
+# here: this file names the environment variables to read them from, and the
+# values belong in a .env file beside it.
+
+# Output language for notes, digests and answers: "zh", "en" or "bilingual".
+# Bot users can override this for themselves with `lang en`.
+default_language = "zh"
+
+[llm]
+# Any OpenAI-compatible endpoint. A few that work as-is:
+#   DeepSeek   https://api.deepseek.com                            deepseek-v4-flash
+#   Qwen       https://dashscope.aliyuncs.com/compatible-mode/v1   qwen-plus
+#   Moonshot   https://api.moonshot.cn/v1                          kimi-k3
+#   GLM        https://open.bigmodel.cn/api/paas/v4                glm-5.2
+#   OpenAI     https://api.openai.com/v1                           gpt-5.6-terra
+#   OpenRouter https://openrouter.ai/api/v1                        any slug
+#   Ollama     http://localhost:11434/v1                           gpt-oss:20b
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+
+# Optional cheaper model for the per-section pass on very long papers, e.g.
+# deepseek-v4-flash when `model` above is deepseek-v4-pro.
+# fast_model = "deepseek-v4-flash"
+
+api_key_env = "SURVEYOR_API_KEY"
+temperature = 0.2
+timeout = 300.0
+max_retries = 4
+
+# Context budget in characters (roughly 3.5 characters per token for English
+# prose). Lower this if your model's window is smaller than 128k tokens.
+max_context_chars = 400000
+
+[arxiv]
+# arXiv asks automated clients to identify themselves. Put a real address here.
+user_agent = "surveyor/1.0 (mailto:you@example.com)"
+request_interval = 3.0
+
+# Only needed for the Feishu and WeCom bots, which `surveyor serve` runs.
+[server]
+host = "0.0.0.0"
+port = 8000
+max_workers = 4
+
+[feishu]
+# The switch under Settings -> Chat bots writes this. It gates both ways of
+# receiving events: `surveyor feishu-connect` and the /webhook/feishu callback.
+enabled = false
+# Use open.larksuite.com instead for Lark international. The long connection
+# derives its own address from this.
+base_url = "https://open.feishu.cn/open-apis"
+
+[wecom]
+# As above: gates `surveyor wecom-connect` and the /webhook/wecom callback alike.
+enabled = false
+# Where `surveyor wecom-connect` dials. Public WeCom by default; a private
+# deployment publishes its own gateway on the admin console.
+ws_url = "wss://openws.work.weixin.qq.com"

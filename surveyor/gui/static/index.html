@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Surveyor</title>
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="brand">
+    <span class="mark">S</span>
+    <div>
+      <strong>Surveyor</strong>
+      <small id="library-root"></small>
+    </div>
+  </div>
+
+  <nav id="nav">
+    <button data-view="library" class="active">Library <span class="count" id="count-papers"></span></button>
+    <button data-view="surveys">Surveys <span class="count" id="count-surveys"></span></button>
+    <button data-view="canon">Core reading</button>
+    <button data-view="ask">Ask</button>
+    <button data-view="knowledge">Knowledge</button>
+    <button data-view="settings">Settings</button>
+  </nav>
+
+  <div class="spacer"></div>
+
+  <details class="activity" id="activity" open>
+    <summary><span class="dot" id="activity-dot"></span><span id="activity-label">Idle</span></summary>
+    <div class="log" id="activity-log"></div>
+  </details>
+</aside>
+
+<main>
+
+  <!-- ------------------------------------------------------------ library -->
+  <section class="view active" id="view-library">
+    <h1>Library</h1>
+    <p class="lede">Paste arXiv ids, links or a mix of both. Surveyor fetches the LaTeX source, converts it to text and writes a note.</p>
+
+    <div class="card">
+      <label>
+        <span>Papers to import — one per line</span>
+        <textarea id="import-text" placeholder="2507.16869&#10;https://arxiv.org/abs/2405.17247&#10;arXiv:2403.14468v2"></textarea>
+      </label>
+      <div class="row tight">
+        <label style="flex:0 0 195px">
+          <span>Read as</span>
+          <select id="import-kind">
+            <option value="">Detect automatically</option>
+            <option value="paper">Ordinary paper</option>
+            <option value="survey">Survey</option>
+          </select>
+        </label>
+        <label class="check" style="flex:0 0 auto; margin-bottom:0">
+          <input type="checkbox" id="import-summarize" checked> Write notes with the model
+        </label>
+        <div style="flex:1"></div>
+        <button class="btn primary" id="import-go" style="flex:0 0 auto">Import</button>
+      </div>
+    </div>
+
+    <div class="toolbar" style="margin-top:22px">
+      <input type="text" id="library-search" placeholder="Filter by title, id or one-liner">
+      <select id="library-kind">
+        <option value="all">Everything</option>
+        <option value="paper">Papers</option>
+        <option value="survey">Surveys</option>
+      </select>
+    </div>
+    <div id="library-list"></div>
+  </section>
+
+  <!-- ------------------------------------------------------------- paper -->
+  <section class="view" id="view-paper">
+    <button class="crumb" data-back="library">&larr; Library</button>
+    <h1 id="paper-title"></h1>
+    <p class="lede" id="paper-meta"></p>
+    <div class="actions" style="margin-bottom:18px">
+      <button class="btn" id="paper-summarize">Write the note</button>
+      <button class="btn" id="paper-ask">Ask about this paper</button>
+      <a class="btn" id="paper-arxiv" target="_blank" rel="noopener">Open on arXiv</a>
+      <button class="btn danger" id="paper-remove">Remove</button>
+    </div>
+    <div class="card prose" id="paper-note"></div>
+  </section>
+
+  <!-- ----------------------------------------------------------- surveys -->
+  <section class="view" id="view-surveys">
+    <h1>Surveys</h1>
+    <p class="lede">A survey's section hierarchy is a ready-made taxonomy of its field, and its bibliography is a curated reading list. Both are extracted from the LaTeX without calling a model.</p>
+    <div id="surveys-list"></div>
+  </section>
+
+  <section class="view" id="view-survey">
+    <button class="crumb" data-back="surveys">&larr; Surveys</button>
+    <h1 id="survey-title"></h1>
+    <p class="lede" id="survey-meta"></p>
+
+    <div class="actions" style="margin-bottom:18px">
+      <button class="btn" id="survey-analyze">Map the taxonomy</button>
+      <button class="btn" id="survey-resolve">Find missing arXiv ids</button>
+      <button class="btn" id="survey-refresh">Re-extract references</button>
+    </div>
+
+    <h2>Taxonomy</h2>
+    <div class="card" id="survey-taxonomy"></div>
+
+    <h2>Reading list</h2>
+    <div class="card">
+      <div class="row tight" style="margin-bottom:12px">
+        <label style="flex:1 1 240px">
+          <span>Branch</span>
+          <select id="survey-section"><option value="">Every branch</option></select>
+        </label>
+        <label style="flex:0 0 120px">
+          <span>Show</span>
+          <input type="number" id="survey-limit" value="40" min="5" max="500">
+        </label>
+        <label class="check" style="flex:0 0 auto">
+          <input type="checkbox" id="survey-missing"> Not yet in the library
+        </label>
+        <div style="flex:1"></div>
+        <button class="btn primary" id="survey-harvest" style="flex:0 0 auto">Import the top 10</button>
+      </div>
+      <div id="survey-refs"></div>
+    </div>
+
+    <h2>Note</h2>
+    <div class="card prose" id="survey-note"></div>
+  </section>
+
+  <!-- ------------------------------------------------------------- canon -->
+  <section class="view" id="view-canon">
+    <h1>Core reading</h1>
+    <p class="lede">Works that several surveys independently cite. Agreement between surveys is a stronger signal than the citation count inside any one of them, and this is pure counting — no model is involved.</p>
+    <div class="toolbar">
+      <label class="check" style="margin:0">
+        Cited by at least
+        <input type="number" id="canon-min" value="2" min="1" max="10" style="width:70px">
+        surveys
+      </label>
+      <button class="btn" id="canon-refresh">Refresh</button>
+    </div>
+    <div id="canon-table"></div>
+  </section>
+
+  <!-- --------------------------------------------------------------- ask -->
+  <section class="view" id="view-ask">
+    <h1>Ask</h1>
+    <p class="lede">Answers are drawn from the papers in your library and cite the section they came from.</p>
+    <div class="card">
+      <label>
+        <span>Question</span>
+        <textarea id="ask-question" placeholder="Which control signals do these surveys agree are solved, and which are still open?"></textarea>
+      </label>
+      <div class="row tight">
+        <label style="flex:1 1 260px">
+          <span>Scope</span>
+          <select id="ask-scope"><option value="">The whole library</option></select>
+        </label>
+        <div style="flex:1"></div>
+        <button class="btn primary" id="ask-go" style="flex:0 0 auto">Ask</button>
+      </div>
+    </div>
+    <div id="ask-answers"></div>
+  </section>
+
+  <!-- --------------------------------------------------------- knowledge -->
+  <section class="view" id="view-knowledge">
+    <h1>Knowledge</h1>
+    <p class="lede">What your reading adds up to: syntheses across papers rather than one note at a time.</p>
+    <div class="card">
+      <div class="actions">
+        <button class="btn" data-build="overview">Library overview</button>
+        <button class="btn" data-build="digests">Topic digests</button>
+        <button class="btn" data-build="glossary">Concept glossary</button>
+        <button class="btn" data-build="merge">Reconcile surveys into a field map</button>
+        <button class="btn" data-build="index">Refresh the index</button>
+      </div>
+      <p class="small muted" style="margin:12px 0 0">The glossary and the index are assembled from existing notes and cost nothing. The others call the model.</p>
+    </div>
+    <h2>Documents</h2>
+    <div id="knowledge-list"></div>
+  </section>
+
+  <section class="view" id="view-doc">
+    <button class="crumb" data-back="knowledge">&larr; Knowledge</button>
+    <div class="card prose" id="doc-body"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------- settings -->
+  <section class="view" id="view-settings">
+    <div class="banner hidden" id="setup-banner">
+      <strong>Welcome to Surveyor</strong>
+      Point it at any OpenAI-compatible model and choose where your library should live. You can import papers without a key, but notes, answers and syntheses need one.
+    </div>
+
+    <h1>Settings</h1>
+    <p class="lede">Saved to <span class="mono" id="settings-paths"></span></p>
+
+    <div class="card">
+      <h2 style="margin-top:0">Library</h2>
+      <label>
+        <span>Folder holding your papers and notes</span>
+        <input type="text" id="set-root" spellcheck="false">
+      </label>
+      <label style="margin-bottom:0">
+        <span>Language for notes and answers</span>
+        <select id="set-language">
+          <option value="zh">中文（技术术语保留英文）</option>
+          <option value="en">English</option>
+          <option value="bilingual">Both, Chinese first</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Model</h2>
+      <label>
+        <span>Provider</span>
+        <select id="set-preset"></select>
+      </label>
+      <div class="row tight">
+        <label style="flex:2 1 320px">
+          <span>API base URL</span>
+          <input type="text" id="set-base-url" spellcheck="false" placeholder="https://api.deepseek.com">
+        </label>
+        <label style="flex:1 1 200px">
+          <span>Model</span>
+          <input type="text" id="set-model" spellcheck="false">
+        </label>
+      </div>
+      <div class="row tight">
+        <label style="flex:2 1 320px">
+          <span>API key</span>
+          <input type="password" id="set-api-key" placeholder="leave blank to keep the saved key" autocomplete="off">
+        </label>
+        <label style="flex:1 1 200px">
+          <span>Cheaper model for long papers (optional)</span>
+          <input type="text" id="set-fast-model" spellcheck="false">
+        </label>
+      </div>
+      <div class="actions">
+        <button class="btn" id="set-test">Test the connection</button>
+      </div>
+      <div class="result hidden" id="set-test-result"></div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Chat bots</h2>
+      <p class="small muted" style="margin-top:0">Ask about your library from a group chat. Credentials belong in <span class="mono">.env</span>; these switches decide whether a bot is turned on.</p>
+      <label class="check">
+        <input type="checkbox" id="set-feishu-enabled"> Feishu / Lark
+        <span class="small muted" id="set-feishu-state"></span>
+      </label>
+      <label class="check" style="margin-bottom:0">
+        <input type="checkbox" id="set-wecom-enabled"> WeCom (企业微信)
+        <span class="small muted" id="set-wecom-state"></span>
+      </label>
+      <p class="small muted" id="set-bots-hint" style="margin:12px 0 0"></p>
+    </div>
+
+    <details class="card">
+      <summary style="cursor:pointer"><strong>Advanced</strong></summary>
+      <div class="row tight" style="margin-top:14px">
+        <label style="flex:1 1 160px">
+          <span>Temperature</span>
+          <input type="number" id="set-temperature" step="0.1" min="0" max="2">
+        </label>
+        <label style="flex:1 1 160px">
+          <span>Request timeout (s)</span>
+          <input type="number" id="set-timeout" min="30" step="10">
+        </label>
+        <label style="flex:1 1 200px">
+          <span>Context budget (characters)</span>
+          <input type="number" id="set-context" min="20000" step="10000">
+        </label>
+      </div>
+      <label>
+        <span>arXiv user agent — put a real address here, arXiv asks clients to identify themselves</span>
+        <input type="text" id="set-user-agent" spellcheck="false">
+      </label>
+      <label style="margin-bottom:0">
+        <span>Seconds between arXiv requests</span>
+        <input type="number" id="set-interval" min="1" step="0.5">
+      </label>
+    </details>
+
+    <div class="actions">
+      <button class="btn primary" id="set-save">Save settings</button>
+      <span class="small muted" id="set-saved"></span>
+    </div>
+  </section>
+
+</main>
+
+<div id="toast"></div>
+<script src="/assets/app.js"></script>
+</body>
+</html>
