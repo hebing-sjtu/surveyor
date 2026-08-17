@@ -243,6 +243,65 @@ textarea { min-height: 86px; resize: vertical; font-family: var(--mono); font-si
 
 .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
+.btn.small { padding: 4px 9px; font-size: 12px; }
+
+/* ------------------------------------------------------- paper picker */
+
+.picker { border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+.picker-head { display: flex; align-items: center; gap: 10px; padding: 8px; }
+.picker-head .picker-search { flex: 1; min-width: 0; }
+.picker-head .picker-count { white-space: nowrap; }
+.picker-search {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.picker-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 8px; }
+.picker-chips:not(:empty) { padding-bottom: 8px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+.chip:hover { border-color: var(--danger); }
+.chip .x { color: var(--muted); }
+
+/* Tall enough to scan, short enough that the question stays on screen. */
+.picker-list { max-height: 232px; overflow-y: auto; border-top: 1px solid var(--border); }
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+}
+.picker-row:last-child { border-bottom: 0; }
+.picker-row:hover { background: var(--panel); }
+.picker-row.on { background: var(--panel); }
+.picker-row input { width: auto; flex: 0 0 auto; }
+.picker-row .picker-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.picker-row .picker-meta { flex: 0 0 auto; color: var(--muted); font-size: 11.5px; }
+
 /* -------------------------------------------------------------- lists */
 
 .toolbar {
@@ -301,6 +360,17 @@ th { color: var(--muted); font-weight: 500; font-size: 12px; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 tbody tr:hover { background: var(--panel-2); }
 
+/* A folder heading in the knowledge document list. */
+h3.group {
+  margin: 22px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+h3.group:first-child { margin-top: 4px; }
+
 /* --------------------------------------------------------- taxonomy */
 
 .tree { margin: 0; padding: 0; list-style: none; }
@@ -332,6 +402,25 @@ tbody tr:hover { background: var(--panel-2); }
 }
 .prose table { margin: 12px 0; }
 .prose a { color: var(--accent); }
+
+/* Wide comparison tables are the norm in these papers; let them scroll
+   sideways instead of squeezing every column into an unreadable strip. */
+.prose .table-scroll { margin: 12px 0; overflow-x: auto; }
+.prose .table-scroll table { margin: 0; min-width: 100%; width: auto; }
+.prose .table-scroll th, .prose .table-scroll td { white-space: nowrap; }
+
+/* ---------------------------------------------------------------- math */
+
+.prose math { font-size: 1.04em; }
+.prose .math-block {
+  display: block;
+  margin: 14px 0;
+  overflow-x: auto;
+  text-align: center;
+}
+.prose .math-block math { font-size: 1.12em; }
+/* A formula we could not parse, shown as its source rather than dropped. */
+.prose code.math-raw { color: var(--muted); }
 
 /* -------------------------------------------------------------- misc */
 

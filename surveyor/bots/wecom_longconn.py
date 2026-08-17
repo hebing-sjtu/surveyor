@@ -169,6 +169,8 @@ def _deliver_to(
     stream_id = uuid.uuid4().hex
     answered = False
 
+    # Unlike every other route, a smart robot can only send markdown or a
+    # template card, so replies here cannot be drawn as pictures.
     def push(piece: str) -> None:
         body = {
             "chat_type": GROUP_CHAT if context.is_group else SINGLE_CHAT,

@@ -11,7 +11,7 @@ import os
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import tomllib
 from dotenv import load_dotenv
@@ -170,6 +170,10 @@ class FeishuConfig(BaseModel):
     verification_token_env: str = "FEISHU_VERIFICATION_TOKEN"
     # open.feishu.cn for the China site, open.larksuite.com for Lark international.
     base_url: str = "https://open.feishu.cn/open-apis"
+    # Feishu cards understand a little Markdown and no tables at all, so a note
+    # full of tables and formulas is sent as a picture of itself instead.
+    # "auto" pictures only the replies that need it. See bots/imaging.py.
+    send_as_image: Literal["auto", "always", "never"] = "auto"
 
     @property
     def app_id(self) -> str | None:
@@ -208,6 +212,9 @@ class WecomConfig(BaseModel):
     base_url: str = "https://qyapi.weixin.qq.com/cgi-bin"
     # Private deployments publish their own gateway on the admin console.
     ws_url: str = "wss://openws.work.weixin.qq.com"
+    # WeCom's markdown message type drops tables and formulas. Same remedy as
+    # for Feishu: send a picture of the reply.
+    send_as_image: Literal["auto", "always", "never"] = "auto"
 
     @property
     def token(self) -> str | None:

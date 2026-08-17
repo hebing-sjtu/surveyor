@@ -7,16 +7,26 @@ reading add up to", which is the part that usually never gets written down.
 from __future__ import annotations
 
 import logging
-import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
 from .config import Language
 from .llm import LLMClient
 from .models import PaperRecord
+from .paths import knowledge_root, note_link, slugify
 from .store import PaperStore
 
 log = logging.getLogger(__name__)
+
+__all__ = [
+    "SYSTEM_PROMPT",
+    "slugify",
+    "topic_index",
+    "write_all_topic_digests",
+    "write_glossary",
+    "write_overview",
+    "write_topic_digest",
+]
 
 SYSTEM_PROMPT = (
     "You are a research advisor synthesizing a reading list into durable knowledge. "
@@ -26,15 +36,12 @@ SYSTEM_PROMPT = (
 )
 
 
-def slugify(text: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return slug or "misc"
-
-
-def topic_index(store: PaperStore) -> dict[str, list[PaperRecord]]:
+def topic_index(
+    store: PaperStore, collection: str | None = None
+) -> dict[str, list[PaperRecord]]:
     """Group summarized papers by topic label."""
     grouped: dict[str, list[PaperRecord]] = defaultdict(list)
-    for record in store.iter_records():
+    for record in store.iter_records(collection):
         if not record.summary:
             continue
         for topic in record.summary.topics or ["Uncategorized"]:
@@ -75,8 +82,9 @@ def write_topic_digest(
     *,
     language: Language | None = None,
     client: LLMClient | None = None,
+    collection: str | None = None,
 ) -> Path:
-    """Synthesize one topic into ``knowledge/topics/<slug>.md``."""
+    """Synthesize one topic into ``topics/<slug>.md`` under its knowledge folder."""
     settings = store.settings
     language = language or settings.default_language
     client = client or LLMClient(settings.llm)
@@ -120,17 +128,16 @@ def write_topic_digest(
         ]
     )
 
-    lines = [f"# {topic}", "", f"{len(ordered)} papers in the library.", "", body, "",
+    path = knowledge_root(settings, collection) / "topics" / f"{slugify(topic)}.md"
+    scope = f"in {collection}" if (collection or "").strip() else "in the library"
+    lines = [f"# {topic}", "", f"{len(ordered)} papers {scope}.", "", body, "",
              "## Papers", ""]
     for record in ordered:
         meta = record.meta
         date = (meta.published or "")[:10]
-        lines.append(
-            f"- [{meta.paper_id}](../../papers/{meta.paper_id}/summary.md) "
-            f"{date} — {meta.display_title}"
-        )
+        target = note_link(settings, meta.paper_id, "summary.md", path.parent)
+        lines.append(f"- [{meta.paper_id}]({target}) {date} — {meta.display_title}")
 
-    path = settings.knowledge_dir / "topics" / f"{slugify(topic)}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -143,11 +150,12 @@ def write_all_topic_digests(
     language: Language | None = None,
     client: LLMClient | None = None,
     only: str | None = None,
+    collection: str | None = None,
 ) -> list[Path]:
     """Regenerate topic digests for every topic with enough papers behind it."""
     client = client or LLMClient(store.settings.llm)
     written: list[Path] = []
-    for topic, records in topic_index(store).items():
+    for topic, records in topic_index(store, collection).items():
         if only and slugify(only) != slugify(topic):
             continue
         if len(records) < min_papers and not only:
@@ -155,7 +163,8 @@ def write_all_topic_digests(
         try:
             written.append(
                 write_topic_digest(
-                    store, topic, records, language=language, client=client
+                    store, topic, records,
+                    language=language, client=client, collection=collection,
                 )
             )
         except Exception as exc:
@@ -163,10 +172,10 @@ def write_all_topic_digests(
     return written
 
 
-def write_glossary(store: PaperStore) -> Path:
+def write_glossary(store: PaperStore, collection: str | None = None) -> Path:
     """Concept -> papers, built directly from the notes without calling a model."""
     concepts: dict[str, list[str]] = defaultdict(list)
-    for record in store.iter_records():
+    for record in store.iter_records(collection):
         if not record.summary:
             continue
         for concept in record.summary.concepts:
@@ -174,15 +183,16 @@ def write_glossary(store: PaperStore) -> Path:
             if key and record.meta.paper_id not in concepts[key]:
                 concepts[key].append(record.meta.paper_id)
 
+    path = knowledge_root(store.settings, collection) / "glossary.md"
     lines = ["# Concept glossary", "",
              "Concepts extracted from paper notes, with the papers that use them.", ""]
     for concept in sorted(concepts, key=lambda name: (-len(concepts[name]), name.lower())):
         papers = ", ".join(
-            f"[{pid}](../papers/{pid}/summary.md)" for pid in concepts[concept]
+            f"[{pid}]({note_link(store.settings, pid, 'summary.md', path.parent)})"
+            for pid in concepts[concept]
         )
         lines.append(f"- **{concept}** — {papers}")
 
-    path = store.settings.knowledge_dir / "glossary.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -193,13 +203,14 @@ def write_overview(
     *,
     language: Language | None = None,
     client: LLMClient | None = None,
+    collection: str | None = None,
 ) -> Path:
-    """A single page describing what the whole library is about."""
+    """A single page describing what the whole library, or one collection, is about."""
     settings = store.settings
     language = language or settings.default_language
     client = client or LLMClient(settings.llm)
 
-    records = [record for record in store.iter_records() if record.summary]
+    records = [record for record in store.iter_records(collection) if record.summary]
     if not records:
         raise ValueError("no summarized papers yet")
 
@@ -213,9 +224,15 @@ def write_overview(
         if record.summary
     ]
 
+    scope = (collection or "").strip()
+    header = (
+        f'A researcher\'s collection "{scope}", {len(records)} papers.\n'
+        if scope
+        else f"A researcher's library of {len(records)} papers.\n"
+    )
     prompt = (
-        f"A researcher's library of {len(records)} papers.\n"
-        f"Topic distribution: {', '.join(f'{t} ({c})' for t, c in topics.most_common())}\n\n"
+        header
+        + f"Topic distribution: {', '.join(f'{t} ({c})' for t, c in topics.most_common())}\n\n"
         + "\n".join(lines)
         + "\n\nWrite a one-page overview: what this researcher is working on, the "
         "clusters their reading falls into and how those clusters relate, the "
@@ -231,7 +248,8 @@ def write_overview(
         ]
     )
 
-    path = settings.knowledge_dir / "overview.md"
+    path = knowledge_root(settings, collection) / "overview.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"# Library overview\n\n{body}\n", encoding="utf-8")
+    heading = f"{scope} — overview" if scope else "Library overview"
+    path.write_text(f"# {heading}\n\n{body}\n", encoding="utf-8")
     return path

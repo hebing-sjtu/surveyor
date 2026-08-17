@@ -89,16 +89,24 @@ Notes, answers and syntheses are the parts that need a model.
 
 | Page | What it is for |
 | --- | --- |
-| **Library** | Paste arXiv ids or links and import them. Every paper gets a note: problem, method, contributions, results, limitations, open questions. |
+| **Library** | Paste arXiv ids or links and import them. Every paper gets a note: problem, method, contributions, results, limitations, open questions. Papers can be filed into collections. |
 | **Surveys** | Each survey's taxonomy and its reference list, ranked by how much the survey actually discusses each work, with the branch it belongs to. One button imports the top ones. |
 | **Core reading** | Works that several surveys independently cite. No model involved — this is counting. |
-| **Ask** | Questions across the library, or scoped to one paper. Every claim cites `[paper_id §section]`. |
-| **Knowledge** | Syntheses across papers: a topic digest, a library overview, a concept glossary, a merged field map. |
+| **Ask** | Questions across the library, or scoped to any set of papers you pick by searching their titles. Every claim cites `[paper_id §section]`. |
+| **Knowledge** | Syntheses across papers: a topic digest, a library overview, a concept glossary, a merged field map — for the whole library or for one collection. |
 | **Settings** | Model, language, where the library lives, and which chat bots are on. |
 
 Long jobs — importing a 600-reference survey, writing a note — run in the
 background with a live log in the sidebar, so you can keep reading while they
 work. The app listens on `127.0.0.1` only and is not reachable from the network.
+
+### Collections
+
+One library can hold several sub-libraries, one per research area. File papers
+into a collection on the Library page, and the Knowledge page will build that
+area's digests, glossary and field map separately, under
+`knowledge/<collection>/`. A paper belongs to at most one collection, and papers
+you never file stay in the library as a whole.
 
 ### A first session
 
@@ -133,6 +141,23 @@ the field the same way, where they genuinely disagree, how the framing shifted
 between an older survey and a newer one, and which subareas only one of them
 covers. The shared-reference table in that document is computed, not generated.
 
+## 📄 The paper, as Markdown
+
+An arXiv upload is LaTeX written for a typesetter, not for reading as text, and
+converting it naively produces the mess this tool exists to avoid. So:
+
+- **Tables become real tables** — a header row, a delimiter row and a fixed
+  column count, which is what makes a Markdown reader draw a grid instead of one
+  run-on paragraph.
+- **Formulas are kept verbatim** and rendered by the browser itself as MathML, so
+  `$a_i$` does not come back with the subscript turned into italics. A formula
+  written over several aligned lines is typeset one line at a time.
+- **Cross-references resolve to numbers.** `\ref{tab:main}` becomes "Table 3",
+  counted the way LaTeX counts, rather than leaking an internal key.
+- **Citations read as `(Author Year)`**, resolved from the paper's own `.bbl` or
+  `.bib`, and in parentheses rather than brackets so no reader mistakes them for
+  links.
+
 ## 🌏 Language
 
 Notes and answers are written in Chinese by default, with technical terms left in
@@ -150,7 +175,10 @@ surveyor survey refs 2507.16869 --section "Camera"
 surveyor survey harvest 2507.16869 -n 10
 surveyor survey core
 surveyor ask "how do these papers keep long-horizon geometry consistent?"
+surveyor ask "谁的显存开销更低？" -p 2503.07598v2 -p 2506.05284v1
 surveyor compare 2503.07598v2 2506.05284v1 --aspect "conditioning mechanism"
+surveyor collection add "Camera control" 2605.15182v1 2607.02798v1
+surveyor topics --collection "Camera control"
 surveyor status
 ```
 
@@ -178,6 +206,15 @@ surveyor serve             # webhooks: POST /webhook/feishu, GET+POST /webhook/w
 Because summarizing a paper takes minutes while both platforms time out in
 seconds, an acknowledgement goes out immediately and the real answer is pushed
 afterwards.
+
+Neither platform draws Markdown tables, and neither draws formulas at all, so an
+answer containing them is rendered with the browser already on the machine and
+sent as a picture instead — the table stays a table. Plain prose is still sent as
+text, and if no browser is found the answer falls back to Markdown. **Settings →
+Chat bots → Send replies as pictures** switches this between automatic, always
+and never; `SURVEYOR_BROWSER` points at a browser if yours is somewhere unusual.
+(A WeCom 智能机器人 on a long connection can only send Markdown, so this applies
+to the other two WeCom routes.)
 
 <details>
 <summary><b>Feishu / Lark setup</b></summary>
@@ -374,7 +411,8 @@ knowledge/
 ├── overview.md      what the library adds up to
 ├── glossary.md      concept → papers
 ├── topics/*.md      per-area synthesis
-└── fields/*.md      several surveys reconciled into one map
+├── fields/*.md      several surveys reconciled into one map
+└── <collection>/    the same set again, for one sub-library
 ```
 
 The folder is whatever you chose on the Settings page, `~/Surveyor` by default.

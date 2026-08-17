@@ -85,7 +85,9 @@ async function runJob(request, onDone) {
 
 /* ----------------------------------------------------------------- state */
 
-const state = { settings: null, stats: null, papers: [], view: "library" };
+const state = {
+  settings: null, stats: null, papers: [], collections: [], view: "library",
+};
 
 async function refreshState() {
   const data = await api("/state");
@@ -158,9 +160,15 @@ const LOADERS = {
 async function loadLibrary() {
   const kind = $("library-kind").value;
   const query = $("library-search").value.trim();
-  const data = await api(`/papers?kind=${kind}&q=${encodeURIComponent(query)}`);
+  const chosen = $("library-collection").value;
+  // An empty value means every collection; UNFILED asks for the papers with none.
+  const scope = chosen === UNFILED ? "&collection=" :
+    chosen ? `&collection=${encodeURIComponent(chosen)}` : "";
+  const data = await api(`/papers?kind=${kind}&q=${encodeURIComponent(query)}${scope}`);
   state.papers = data.papers;
   fillScopeSelect(data.papers);
+  filePicker?.setPapers(data.papers);
+  await loadCollections();
 
   const list = $("library-list");
   if (!data.papers.length) {
@@ -173,6 +181,7 @@ async function loadLibrary() {
     <button class="item" data-paper="${esc(paper.paper_id)}">
       <div class="title">${esc(paper.title)}
         ${paper.kind === "survey" ? '<span class="tag">survey</span>' : ""}
+        ${paper.collection ? `<span class="tag plain">${esc(paper.collection)}</span>` : ""}
         ${paper.has_note ? "" : '<span class="tag plain">no note</span>'}
       </div>
       <div class="meta">${esc(paper.paper_id)} · ${esc(paper.published || "date unknown")} · ${esc(paper.authors)}</div>
@@ -200,8 +209,11 @@ async function openPaper(paperId, remember = true) {
   $("paper-title").textContent = paper.title;
   $("paper-meta").textContent =
     `${paper.paper_id} · ${paper.published || "date unknown"} · ${paper.authors}`;
+  // Without a note the abstract is the next best thing, but it is the paper's
+  // own words and must not read as a continuation of our notice.
   $("paper-note").innerHTML = data.note_html ||
-    `<p class="muted">No note yet. ${esc(data.abstract)}</p>`;
+    `<p class="muted">No note yet — the abstract, from arXiv:</p>
+     <blockquote>${esc(data.abstract)}</blockquote>`;
 
   const link = $("paper-arxiv");
   link.href = paper.abs_url || `https://arxiv.org/abs/${paper.arxiv_id}`;
@@ -213,7 +225,7 @@ async function openPaper(paperId, remember = true) {
            () => openPaper(paperId));
   $("paper-ask").onclick = () => {
     show("ask");
-    $("ask-scope").value = paperId;
+    askPicker.setSelection([paperId]);
     $("ask-question").focus();
   };
   $("paper-remove").onclick = async () => {
@@ -378,51 +390,214 @@ async function loadCanon() {
   });
 }
 
+/* ----------------------------------------------------------- collections */
+
+/* Chosen so it cannot collide with a collection someone actually names. */
+const UNFILED = "\u0000unfiled";
+
+let filePicker;
+
+async function loadCollections() {
+  const data = await api("/collections");
+  state.collections = data.collections;
+
+  const options = (extra) => '<option value="">' + extra + "</option>" +
+    data.collections.map((item) =>
+      `<option value="${esc(item.name)}">${esc(item.name)} (${item.papers})</option>`).join("");
+
+  const filter = $("library-collection");
+  const kept = filter.value;
+  filter.innerHTML = options("All collections") +
+    (data.unfiled ? `<option value="${UNFILED}">Unfiled (${data.unfiled})</option>` : "");
+  filter.value = kept;
+  if (filter.value !== kept) filter.value = "";
+
+  const scope = $("knowledge-collection");
+  const keptScope = scope.value;
+  scope.innerHTML = options("The whole library");
+  scope.value = keptScope;
+  if (scope.value !== keptScope) scope.value = "";
+
+  $("collection-names").innerHTML = data.collections
+    .map((item) => `<option value="${esc(item.name)}">`).join("");
+}
+
+async function filePapers(name) {
+  const papers = filePicker.selected();
+  if (!papers.length) return toast("Select the papers to file first.", true);
+  const data = await api("/collections/assign", { body: { papers, collection: name } });
+  toast(name
+    ? `Filed ${data.moved.length} paper(s) under ${name}`
+    : `Unfiled ${data.moved.length} paper(s)`);
+  $("file-panel").classList.add("hidden");
+  filePicker.setSelection([]);
+  await loadLibrary();
+}
+
+/* ---------------------------------------------------------- paper picker */
+
+/* A searchable, multi-select list of papers. Used for the scope of a question
+   and for putting papers into a collection, so it takes its rows from whatever
+   list it is handed rather than fetching its own. */
+function createPicker(rootId, { onChange, emptyLabel = "the whole library" } = {}) {
+  const root = $(rootId);
+  const search = root.querySelector(".picker-search");
+  const list = root.querySelector(".picker-list");
+  const chips = root.querySelector(".picker-chips");
+  const count = root.querySelector(".picker-count");
+  const clear = root.querySelector(".picker-clear");
+
+  let papers = [];
+  const chosen = new Map();
+
+  const matches = (paper, needle) =>
+    !needle ||
+    `${paper.title} ${paper.paper_id} ${paper.authors || ""}`.toLowerCase().includes(needle);
+
+  function draw() {
+    const needle = search.value.trim().toLowerCase();
+    const shown = papers.filter((paper) => matches(paper, needle));
+    list.innerHTML = shown.length
+      ? shown.slice(0, 200).map((paper) => `
+          <label class="picker-row${chosen.has(paper.paper_id) ? " on" : ""}">
+            <input type="checkbox" value="${esc(paper.paper_id)}"
+                   ${chosen.has(paper.paper_id) ? "checked" : ""}>
+            <span class="picker-title">${esc(paper.title)}</span>
+            <span class="picker-meta mono">${esc(paper.paper_id)}</span>
+            ${paper.kind === "survey" ? '<span class="tag">survey</span>' : ""}
+          </label>`).join("")
+      : '<div class="empty small">Nothing matches that.</div>';
+
+    list.querySelectorAll("input[type=checkbox]").forEach((box) => {
+      box.onchange = () => {
+        const paper = papers.find((item) => item.paper_id === box.value);
+        if (box.checked && paper) chosen.set(paper.paper_id, paper);
+        else chosen.delete(box.value);
+        draw();
+        onChange?.(selected());
+      };
+    });
+
+    chips.innerHTML = [...chosen.values()].map((paper) => `
+      <span class="chip" data-drop="${esc(paper.paper_id)}">
+        ${esc(paper.title.slice(0, 46))}${paper.title.length > 46 ? "…" : ""}
+        <span class="x">×</span>
+      </span>`).join("");
+    chips.querySelectorAll("[data-drop]").forEach((chip) => {
+      chip.onclick = () => {
+        chosen.delete(chip.dataset.drop);
+        draw();
+        onChange?.(selected());
+      };
+    });
+
+    count.textContent = chosen.size
+      ? `${chosen.size} selected`
+      : `none selected — ${emptyLabel}`;
+    clear.classList.toggle("hidden", chosen.size === 0);
+  }
+
+  const selected = () => [...chosen.keys()];
+
+  search.oninput = draw;
+  clear.onclick = () => {
+    chosen.clear();
+    draw();
+    onChange?.(selected());
+  };
+
+  return {
+    selected,
+    setPapers(next) {
+      papers = next || [];
+      const live = new Set(papers.map((paper) => paper.paper_id));
+      [...chosen.keys()].filter((id) => !live.has(id)).forEach((id) => chosen.delete(id));
+      draw();
+    },
+    setSelection(ids) {
+      chosen.clear();
+      (ids || []).forEach((id) => {
+        const paper = papers.find((item) => item.paper_id === id);
+        if (paper) chosen.set(id, paper);
+      });
+      draw();
+    },
+  };
+}
+
 /* ------------------------------------------------------------------- ask */
 
+let askPicker;
+
 function fillScopeSelect(papers) {
-  const select = $("ask-scope");
-  const chosen = select.value;
-  select.innerHTML = '<option value="">The whole library</option>' +
-    papers.map((paper) =>
-      `<option value="${esc(paper.paper_id)}">${esc(paper.title.slice(0, 70))}</option>`).join("");
-  select.value = chosen;
+  askPicker?.setPapers(papers);
+}
+
+function answerCard(title, html, sources) {
+  const card = document.createElement("div");
+  card.className = "card prose";
+  card.innerHTML =
+    `<h3>${esc(title)}</h3>${html}` +
+    (sources?.length
+      ? `<p class="small muted">Sources: ${sources.map(esc).join(" · ")}</p>`
+      : "");
+  $("ask-answers").prepend(card);
 }
 
 function askQuestion() {
   const question = $("ask-question").value.trim();
-  if (!question) return;
-  const scope = $("ask-scope").value;
-  runJob(api("/ask", { body: { question, papers: scope ? [scope] : null } }), (job) => {
-    const answer = job.result;
-    if (!answer) return;
-    const card = document.createElement("div");
-    card.className = "card prose";
-    card.innerHTML =
-      `<h3>${esc(answer.question)}</h3>${answer.html}` +
-      (answer.sources?.length
-        ? `<p class="small muted">Sources: ${answer.sources.map(esc).join(" · ")}</p>`
-        : "");
-    $("ask-answers").prepend(card);
+  if (!question) return toast("Ask something first.", true);
+  const papers = askPicker.selected();
+  runJob(api("/ask", { body: { question, papers: papers.length ? papers : null } }), (job) => {
+    if (!job.result) return;
+    answerCard(job.result.question, job.result.html, job.result.sources);
     $("ask-question").value = "";
+  });
+}
+
+function comparePapers() {
+  const papers = askPicker.selected();
+  if (papers.length < 2) return toast("Select at least two papers to compare.", true);
+  const aspect = $("ask-question").value.trim();
+  runJob(api("/compare", { body: { papers, aspect } }), (job) => {
+    if (!job.result) return;
+    answerCard(aspect || `Comparing ${papers.length} papers`, job.result.html, papers);
   });
 }
 
 /* ------------------------------------------------------------- knowledge */
 
 async function loadKnowledge() {
-  const data = await api("/knowledge");
+  const collection = $("knowledge-collection").value;
+  await loadCollections();
+  $("knowledge-collection").value = collection;
+  const data = await api(
+    "/knowledge" + (collection ? `?collection=${encodeURIComponent(collection)}` : "")
+  );
   const list = $("knowledge-list");
   if (!data.documents.length) {
     list.innerHTML = `<div class="empty">Nothing written yet. The buttons above build these
       from the notes you already have.</div>`;
     return;
   }
-  list.innerHTML = data.documents.map((document_) => `
-    <button class="item" data-doc="${esc(document_.name)}">
-      <div class="title">${esc(document_.title)}</div>
-      <div class="meta mono">${esc(document_.name)}</div>
-    </button>`).join("");
+
+  // Group by the folder each document sits in, so topics/ and fields/ read as
+  // sections rather than as a flat list of paths.
+  const groups = new Map();
+  data.documents.forEach((document_) => {
+    const folder = document_.folder || "";
+    if (!groups.has(folder)) groups.set(folder, []);
+    groups.get(folder).push(document_);
+  });
+
+  list.innerHTML = [...groups.entries()].map(([folder, documents]) => `
+    ${folder ? `<h3 class="group">${esc(folder)}</h3>` : ""}
+    ${documents.map((document_) => `
+      <button class="item" data-doc="${esc(document_.name)}">
+        <div class="title">${esc(document_.title)}</div>
+        <div class="meta mono">${esc(document_.name)}</div>
+      </button>`).join("")}`).join("");
+
   list.querySelectorAll("[data-doc]").forEach((node) => {
     node.onclick = () => openDoc(node.dataset.doc);
   });
@@ -489,6 +664,10 @@ function fillSettings() {
     : bots.has_wecom_token
       ? "— self-built app credentials found"
       : "— needs WECOM_BOT_ID, or WECOM_TOKEN and the rest, in .env";
+  $("set-send-as-image").value = bots.send_as_image || "auto";
+  $("set-image-state").textContent = bots.can_draw
+    ? "Neither platform draws Markdown tables or formulas, so a reply that has them is rendered to an image first."
+    : "No Chrome-family browser was found, so replies are sent as text whatever this says. Set SURVEYOR_BROWSER to point at one.";
   fillBotsHint();
 }
 
@@ -527,8 +706,14 @@ async function saveSettings() {
       user_agent: $("set-user-agent").value.trim(),
       request_interval: Number($("set-interval").value),
     },
-    feishu: { enabled: $("set-feishu-enabled").checked },
-    wecom: { enabled: $("set-wecom-enabled").checked },
+    feishu: {
+      enabled: $("set-feishu-enabled").checked,
+      send_as_image: $("set-send-as-image").value,
+    },
+    wecom: {
+      enabled: $("set-wecom-enabled").checked,
+      send_as_image: $("set-send-as-image").value,
+    },
     secrets: key ? { [state.settings.llm.api_key_env]: key } : {},
   };
   try {
@@ -573,11 +758,13 @@ function wire() {
       body: {
         text,
         kind: $("import-kind").value || null,
+        collection: $("import-collection").value.trim(),
         summarize: $("import-summarize").checked,
       },
     }), () => {
       $("import-text").value = "";
       loadLibrary();
+      refreshState();
     });
   };
 
@@ -596,17 +783,31 @@ function wire() {
   $("canon-refresh").onclick = loadCanon;
   $("canon-min").onchange = loadCanon;
 
+  askPicker = createPicker("ask-picker");
   $("ask-go").onclick = askQuestion;
+  $("ask-compare").onclick = comparePapers;
   $("ask-question").onkeydown = (event) => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) askQuestion();
   };
 
+  filePicker = createPicker("file-picker", { emptyLabel: "nothing to file" });
+  $("library-collection").onchange = loadLibrary;
+  $("library-file").onclick = () => {
+    const panel = $("file-panel");
+    panel.classList.toggle("hidden");
+    if (!panel.classList.contains("hidden")) $("file-name").focus();
+  };
+  $("file-go").onclick = () => filePapers($("file-name").value.trim());
+  $("file-clear").onclick = () => filePapers("");
+
+  $("knowledge-collection").onchange = loadKnowledge;
   document.querySelectorAll("[data-build]").forEach((button) => {
     button.onclick = () => {
       const what = button.dataset.build;
+      const collection = $("knowledge-collection").value;
       const request = what === "merge"
-        ? api("/surveys/merge", { body: {} })
-        : api("/knowledge/build", { body: { what } });
+        ? api("/surveys/merge", { body: { collection } })
+        : api("/knowledge/build", { body: { what, collection } });
       runJob(request, loadKnowledge);
     };
   });

@@ -396,6 +396,45 @@ def collect_macros(text: str) -> dict[str, tuple[int, str]]:
     return macros
 
 
+# Conference styles carry the shorthands nearly every paper in the field uses:
+# iccv.sty and cvpr.sty define \eg, \ie, \etal, \etc, \vs and \wrt. Left
+# unexpanded they surface in the prose as stray commands.
+_STYLE_SUFFIXES = (".sty", ".cls", ".clo")
+# A style file is mostly internals; only the shorthands are worth reading.
+_MAX_STYLE_BYTES = 400_000
+# Commands this module renders itself. A style file that redefines \section in
+# terms of its own internals would otherwise turn every heading into noise.
+_STRUCTURAL = frozenset(
+    ["part", "chapter", "section", "subsection", "subsubsection", "paragraph", "subparagraph", "title", "author", "abstract", "caption", "captionof", "label", "ref", "eqref", "autoref", "cref", "Cref", "cite", "citep", "citet", "citealp", "citealt", "bibitem", "bibliography", "item", "footnote", "textbf", "textit", "texttt", "emph", "underline", "href", "url", "input", "include", "includegraphics", "begin", "end", "multicolumn", "multirow", "hline", "toprule", "midrule", "bottomrule", "maketitle", "appendix", "newblock", "and", "thanks"]
+)
+
+
+def collect_style_macros(source_dir: Path) -> dict[str, tuple[int, str]]:
+    r"""Shorthand macros from the style files shipped alongside the paper.
+
+    Only shorthands: a style file also rewires the document's structure in terms
+    of LaTeX internals, and borrowing those definitions produces nonsense where
+    the headings used to be.
+    """
+    macros: dict[str, tuple[int, str]] = {}
+    for path in sorted(source_dir.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in _STYLE_SUFFIXES:
+            continue
+        try:
+            if path.stat().st_size > _MAX_STYLE_BYTES:
+                continue
+        except OSError:
+            continue
+        for name, (nargs, body) in collect_macros(strip_comments(_read(path))).items():
+            if "@" in name or name in _STRUCTURAL:
+                continue
+            # A body reaching for internals is plumbing, not a shorthand.
+            if re.search(r"\\[a-zA-Z]*@", body):
+                continue
+            macros.setdefault(name, (nargs, body))
+    return macros
+
+
 _DEFINITION_HEAD = re.compile(
     r"\\(newcommand|renewcommand|providecommand|def|edef|gdef|xdef|let|setlength"
     r"|DeclareMathOperator|newtheorem|newcolumntype|newenvironment|renewenvironment)"
@@ -412,7 +451,9 @@ def _skip_definition(text: str, index: int, kind: str) -> int:
         return match.end() if match else index
 
     if kind in ("def", "edef", "gdef", "xdef"):
-        match = re.compile(r"\s*\\[a-zA-Z@]+").match(text, index)
+        # A control sequence is either letters or one other character, so
+        # \def\1n{...} names the macro \1 — and missing that leaks the body.
+        match = re.compile(r"\s*\\(?:[a-zA-Z@]+|[^a-zA-Z@\s])").match(text, index)
         if not match:
             return index
         # Whatever sits between the name and the body is TeX's parameter text.
@@ -726,6 +767,7 @@ _DROP_COMMANDS_NOARG = (
     "xspace", "protect", "boldmath", "unboldmath", "em", "rm", "sf", "tt",
     "sl", "sc", "it", "normalfont", "leavevmode", "relax", "topsep",
     "bf", "pagebreak", "nobreak", "allowbreak", "unskip", "strut",
+    "begingroup", "endgroup", "bgroup", "egroup",
     "FloatBarrier", "endinput", "appendix", "fill", "onedot", "makeatletter",
     "makeatother", "sloppy", "flushbottom", "twocolumn", "onecolumn",
 )
@@ -733,12 +775,17 @@ _DROP_COMMANDS_NOARG = (
 _DROP_COMMANDS_ONEARG = (
     "label", "vspace", "hspace", "includegraphics", "setlength", "bibliographystyle",
     "bibliography", "usepackage", "documentclass", "pagestyle", "thispagestyle",
-    "addcontentsline", "captionsetup", "definecolor", "graphicspath", "input@path",
+    "addcontentsline", "captionsetup", "graphicspath", "input@path",
     "renewcommand", "newcommand", "providecommand", "DeclareMathOperator",
     "setcounter", "addtocounter", "arraystretch", "resizebox", "phantom",
     "color", "rowcolor", "cellcolor", "columncolor", "arrayrulecolor",
-    "pagecolor", "colorbox", "keywords", "authorrunning", "titlerunning",
+    "pagecolor", "keywords", "authorrunning", "titlerunning",
     "ding", "arabic", "roman", "alph", "vcenter", "hbox",
+    # Springer and authblk metadata. The author list comes from arXiv instead,
+    # and left alone these fill the top of the page with markup.
+    "author", "affil", "affiliation", "email", "equalcont", "fnm", "sur",
+    "orcidlink", "inst", "institute", "address", "footnotemark",
+    "tikz", "path", "forestoption", "noexpand", "addtolength", "tabcolsep",
 )
 
 _TEXT_STYLE = {
@@ -766,6 +813,58 @@ _UNESCAPES = {
     "\ue000": "%", "\ue001": "&", "\ue002": "_", "\ue003": "#",
     "\ue004": "$", "\ue005": "{", "\ue006": "}",
 }
+
+# Math is parked on a private-use code point plus an index while the surrounding
+# prose is rewritten, then put back untouched. Every transformation below this
+# point — brace stripping, symbol substitution, `\\` to newline — is correct for
+# prose and wrong for formulas, and a formula mangled once cannot be repaired.
+_MATH_SENTINEL = "\ue100"
+_MATH_SPAN = re.compile(
+    r"""
+      \$\$(?P<display>.+?)\$\$          # $$ ... $$
+    | \\\[(?P<bracket>.+?)\\\]          # \[ ... \]
+      # An unmatched `$` must not swallow the rest of the paper, so inline math
+      # is not allowed to cross a blank line.
+    | (?<!\\)\$(?P<inline>(?:\\.|[^$\\\n]|\n(?!\s*\n))+?)\$
+    | \\\((?P<paren>.+?)\\\)            # \( ... \)
+    """,
+    re.DOTALL | re.VERBOSE,
+)
+
+
+class MathVault:
+    """Holds formulas aside, keyed by the placeholder left in their place."""
+
+    def __init__(self) -> None:
+        self.spans: list[tuple[str, bool]] = []
+
+    def park(self, latex: str, display: bool) -> str:
+        self.spans.append((" ".join(latex.split()), display))
+        return f"{_MATH_SENTINEL}{len(self.spans) - 1}{_MATH_SENTINEL}"
+
+    def restore(self, text: str) -> str:
+        def put_back(match: re.Match[str]) -> str:
+            latex, display = self.spans[int(match.group(1))]
+            if not latex:
+                return ""
+            return f"\n\n$$ {latex} $$\n\n" if display else f"${latex}$"
+
+        return re.sub(
+            f"{_MATH_SENTINEL}(\\d+){_MATH_SENTINEL}", put_back, text
+        )
+
+
+def _park_math(tex: str, vault: MathVault) -> str:
+    """Replace every inline and display formula with a placeholder."""
+
+    def park(match: re.Match[str]) -> str:
+        display = match.group("display") or match.group("bracket")
+        if display is not None:
+            return vault.park(display, True)
+        return vault.park(match.group("inline") or match.group("paren") or "", False)
+
+    return _MATH_SPAN.sub(park, tex)
+
 
 def _strip_group_braces(text: str) -> str:
     r"""Drop grouping braces while keeping the ones that are command arguments.
@@ -838,7 +937,9 @@ def _reflow(text: str) -> str:
         lines = [line for line in block.split("\n") if line.strip()]
         if not lines:
             continue
-        if any(line.startswith("#") or " | " in line for line in lines):
+        # Headings, table rows and display math own their line breaks. Testing for
+        # a leading pipe rather than an inner one matters: `$p(a | b)$` is prose.
+        if any(line.startswith(("#", "|", "$$")) for line in lines):
             blocks.append("\n".join(lines))
         elif any(line.startswith("- ") for line in lines):
             items: list[str] = []
@@ -866,60 +967,243 @@ def _render_caption(body: str) -> str:
     return caption
 
 
+_LABEL = re.compile(r"\\label\s*\{([^}]+)\}")
+_COUNTER_EVENT = re.compile(
+    r"\\(?P<section>part|chapter|section|subsection|subsubsection)\*?(?![a-zA-Z])"
+    r"|\\begin\s*\{(?P<begin>[^}]+)\}"
+    r"|\\end\s*\{(?P<end>[^}]+)\}"
+    r"|\\captionof\s*\*?\s*\{(?P<captionof>[^}]+)\}"
+    r"|\\label\s*\{(?P<label>[^}]+)\}"
+    r"|(?P<row>\\\\)"
+)
+_NUMBERED_FLOATS = {
+    "table": "table", "table*": "table", "sidewaystable": "table",
+    "figure": "figure", "figure*": "figure", "wrapfigure": "figure",
+    "SCfigure": "figure",
+    "equation": "equation", "align": "equation", "gather": "equation",
+    "multline": "equation", "eqnarray": "equation",
+}
+_SECTION_DEPTH = {"part": 0, "chapter": 0, "section": 0, "subsection": 1, "subsubsection": 2}
+# These number every line rather than the environment as a whole. `multline`
+# prints one number for the lot, so it stays out.
+_MULTILINE_EQUATIONS = frozenset({"align", "gather", "eqnarray", "alignat", "flalign"})
+
+
+def number_labels(tex: str) -> dict[str, str]:
+    r"""Give every ``\label`` the number a LaTeX run would have printed."""
+    return walk_counters(tex)[0]
+
+
+def walk_counters(tex: str) -> tuple[dict[str, str], list[str]]:
+    r"""Numbers for every ``\label``, and for each ``\captionof`` in order.
+
+    Without this a cross-reference reads ``as shown in Table (tab:dataset)``,
+    which is worse than useless: the reader sees an internal key, and so does the
+    model. Counters advance in document order, which is what LaTeX does too, so
+    the numbers agree with the published paper in the common case.
+    """
+    numbers: dict[str, str] = {}
+    captions: list[str] = []
+    section = [0, 0, 0]
+    counters = {"table": 0, "figure": 0, "equation": 0}
+    # The innermost numbered float still open, as ``(kind, environment)``, so a
+    # label lands on the right thing.
+    open_floats: list[tuple[str, str]] = []
+    section_number = ""
+    # A teaser figure is often a bare \includegraphics with \captionof{figure},
+    # outside any float, and its \label follows the caption rather than sitting
+    # inside anything. Remember the caption until that label turns up.
+    captioned = ""
+
+    for match in _COUNTER_EVENT.finditer(tex):
+        if name := match.group("section"):
+            depth = _SECTION_DEPTH.get(name, 0)
+            section[depth] += 1
+            for deeper in range(depth + 1, 3):
+                section[deeper] = 0
+            section_number = ".".join(str(section[level]) for level in range(depth + 1))
+            captioned = ""
+        elif environment := match.group("begin"):
+            name = environment.strip()
+            kind = _NUMBERED_FLOATS.get(name)
+            if kind:
+                counters[kind] += 1
+                open_floats.append((kind, name))
+                captioned = ""
+        elif environment := match.group("end"):
+            kind = _NUMBERED_FLOATS.get(environment.strip())
+            if kind and open_floats and open_floats[-1][0] == kind:
+                open_floats.pop()
+        elif match.group("row"):
+            # Every line of an align gets its own number, so two labels in one
+            # environment must not come out as the same equation.
+            if open_floats and open_floats[-1][1] in _MULTILINE_EQUATIONS:
+                counters["equation"] += 1
+        elif name := match.group("captionof"):
+            kind = _NUMBERED_FLOATS.get(name.strip())
+            if kind and not open_floats:
+                counters[kind] += 1
+                captioned = kind
+                captions.append(str(counters[kind]))
+            else:
+                captions.append("")
+        elif label := match.group("label"):
+            if open_floats:
+                numbers[label.strip()] = str(counters[open_floats[-1][0]])
+            elif captioned:
+                numbers[label.strip()] = str(counters[captioned])
+                captioned = ""
+            elif section_number:
+                numbers[label.strip()] = section_number
+    return numbers, captions
+
+
+# The lookarounds keep the two halves of `**` from being read as separate
+# italic markers, which would swallow the spaces around a nested `*inner*`.
+_EMPHASIS_SPAN = re.compile(
+    r"(?<!\*)(\*{1,2})(?!\*)[ \t]*([^*\n]*[^*\s][^*\n]*?)[ \t]*\1(?!\*)"
+)
+
+# Label prefixes are conventional enough to recover the word cleveref would have
+# printed. Anything unlisted falls back to the bare number.
+_REF_WORDS = {
+    "fig": "Figure", "figure": "Figure", "tab": "Table", "table": "Table",
+    "sec": "Section", "section": "Section", "subsec": "Section",
+    "eq": "Equation", "eqn": "Equation", "equation": "Equation",
+    "alg": "Algorithm", "algo": "Algorithm", "algorithm": "Algorithm",
+    "app": "Appendix", "appendix": "Appendix", "chap": "Chapter",
+    "thm": "Theorem", "theorem": "Theorem", "lem": "Lemma", "lemma": "Lemma",
+    "prop": "Proposition", "def": "Definition", "cor": "Corollary",
+    "lst": "Listing", "line": "Line", "part": "Part",
+}
+
+# A float declared somewhere we dropped, most often a teaser inside a redefined
+# \@maketitle, leaves the reference word followed by the unresolved marker.
+_ORPHAN_REF = re.compile(
+    r"\b(Table|Tab\.|Figure|Fig\.|Section|Sec\.|Equation|Eq\.|Appendix|Algorithm"
+    r"|Alg\.|Listing|Part|Chapter)\s*~?\s*\?",
+    re.IGNORECASE,
+)
+
+_TABLE_RULES = re.compile(
+    r"\\(?:hline|toprule|midrule|bottomrule|addlinespace|centering|arrayrulecolor"
+    r"|cmidrule|cline|specialrule|rowcolor|morecmidrules|noalign)"
+    r"(?:\s*\([^)]*\))?(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\})*"
+)
+
 _TABULAR_ENVIRONMENTS = ("tabular", "tabularx", "tabu", "longtable", "array")
 # Very large tables cost a lot of context for little added meaning.
 _MAX_TABLE_ROWS = 80
 
 
-def _tabular_rows(inner: str) -> list[str]:
-    """Flatten the body of a ``tabular`` into pipe-separated rows."""
+def _tabular_rows(inner: str) -> list[list[str]]:
+    """Split the body of a ``tabular`` into rows of cells."""
     # Drop the column specification that follows \begin{tabular}.
     spec, offset = _read_group(inner, 0)
     if spec is not None and re.fullmatch(r"[lcrpXm@{}|\d.\s>%\\]*", spec or ""):
         inner = inner[offset:]
 
-    rows: list[str] = []
+    # Horizontal rules are layout, and left in place they become an empty row.
+    inner = _TABLE_RULES.sub("", inner)
+
+    rows: list[list[str]] = []
     for line in re.split(r"\\\\", inner):
-        cells = [" ".join(cell.split()) for cell in re.split(r"(?<!\\)&", line)]
-        cells = [cell for cell in cells if cell]
-        if cells:
-            rows.append(" | ".join(cells))
+        cells = [" ".join(cell.split()).replace("|", r"\|") for cell in re.split(r"(?<!\\)&", line)]
+        if any(cells):
+            rows.append(cells)
     return rows
 
 
-def _render_table(body: str) -> str:
+def _as_markdown_table(rows: list[list[str]]) -> list[str]:
+    """Write rows as a GitHub table.
+
+    A pipe-separated block is only a table to a Markdown reader if a delimiter
+    row follows the header and every row has the same number of cells, so both
+    are forced here. Without them the whole table renders as one run-on
+    paragraph, which is how these papers were reading before.
+    """
+    rows = [row for row in rows if any(cell.strip() for cell in row)]
+    if not rows:
+        return []
+    width = max(len(row) for row in rows)
+    if width < 2:
+        return [row[0] for row in rows if row]
+
+    lines: list[str] = []
+    for index, row in enumerate(rows[: _MAX_TABLE_ROWS]):
+        cells = [cell or " " for cell in row] + [" "] * (width - len(row))
+        lines.append("| " + " | ".join(cells) + " |")
+        if index == 0:
+            lines.append("|" + "|".join([" --- "] * width) + "|")
+    return lines
+
+
+def _render_table(body: str, number: str = "") -> str:
     """Render a table float: keep the caption and the numbers, drop the layout."""
     parts: list[str] = []
     caption = _render_caption(body)
     if caption:
-        parts.append(f"**Table.** {caption}")
+        parts.append(f"**Table {number}.** {caption}" if number else f"**Table.** {caption}")
+    rows: list[list[str]] = []
     for env in _TABULAR_ENVIRONMENTS:
         for _begin, body_start, body_end, _end in _iter_environments(body, env):
-            parts.extend(_tabular_rows(body[body_start:body_end]))
-    parts = parts[: _MAX_TABLE_ROWS + 1]
+            rows.extend(_tabular_rows(body[body_start:body_end]))
+    table = _as_markdown_table(rows)
+    if table:
+        parts.extend(["", *table])
     return "\n\n" + "\n".join(parts) + "\n\n" if parts else "\n"
 
 
 def _render_bare_tabular(body: str) -> str:
     """Render a ``tabular`` that was not wrapped in a table float."""
-    rows = _tabular_rows(body)[:_MAX_TABLE_ROWS]
+    rows = _as_markdown_table(_tabular_rows(body))
     return "\n\n" + "\n".join(rows) + "\n\n" if rows else "\n"
 
 
-def _render_figure(body: str) -> str:
+def _render_figure(body: str, number: str = "") -> str:
     caption = _render_caption(body)
-    return f"\n\n**Figure.** {caption}\n\n" if caption else "\n"
+    if not caption:
+        return "\n"
+    head = f"**Figure {number}.**" if number else "**Figure.**"
+    return f"\n\n{head} {caption}\n\n"
+
+
+_MATH_ENVIRONMENTS = (
+    "equation", "equation*", "align", "align*", "alignat", "alignat*",
+    "gather", "gather*", "eqnarray", "eqnarray*", "multline", "multline*",
+    "displaymath", "math",
+)
 
 
 def tex_to_markdown(tex: str, bib_labels: dict[str, str] | None = None) -> str:
     """Rewrite a flattened LaTeX body into Markdown-ish plain text."""
     labels = bib_labels or {}
+    numbers, _captionof_numbers = walk_counters(tex)
+    vault = MathVault()
 
-    # Figures and floats first: their captions are worth keeping, the rest is not.
+    def label_number(body: str) -> str:
+        """The printed number of the float, taken from the label it declares."""
+        for match in _LABEL.finditer(body):
+            if number := numbers.get(match.group(1).strip()):
+                return number
+        return ""
+
+    # Formulas go into the vault before anything rewrites the prose around them.
+    for env in _MATH_ENVIRONMENTS:
+        tex = _transform_environment(
+            tex, env, lambda body: vault.park(_LABEL.sub("", body), True)
+        )
+    tex = _park_math(tex, vault)
+
+    # Figures and floats next: their captions are worth keeping, the rest is not.
     for env in ("figure*", "figure", "wrapfigure", "SCfigure"):
-        tex = _transform_environment(tex, env, _render_figure)
+        tex = _transform_environment(
+            tex, env, lambda body: _render_figure(body, label_number(body))
+        )
     for env in ("table*", "table", "sidewaystable"):
-        tex = _transform_environment(tex, env, _render_table)
+        tex = _transform_environment(
+            tex, env, lambda body: _render_table(body, label_number(body))
+        )
     # Any tabular left over was not inside a float.
     for env in _TABULAR_ENVIRONMENTS:
         tex = _transform_environment(tex, env, _render_bare_tabular)
@@ -930,8 +1214,18 @@ def tex_to_markdown(tex: str, bib_labels: dict[str, str] | None = None) -> str:
         tex = _transform_environment(tex, env, lambda body: body)
 
     tex = _transform_environment(tex, "abstract", lambda body: f"\n\n## Abstract\n\n{body}\n\n")
-    for env in ("equation", "equation*", "align", "align*", "gather", "gather*", "eqnarray", "multline"):
-        tex = _transform_environment(tex, env, lambda body: f"\n\n$$ {' '.join(body.split())} $$\n\n")
+    # Springer's class takes the abstract as an argument rather than an environment.
+    tex = replace_command(tex, "abstract", 1, lambda args, _o: f"\n\n## Abstract\n\n{args[0]}\n\n")
+
+    # A teaser figure outside any float still has a caption worth keeping, and
+    # number_labels has already given it a number.
+    def render_captionof(args: list[str], _optional: str | None) -> str:
+        word = "Table" if args[0].strip().lower().startswith("table") else "Figure"
+        number = _captionof_numbers.pop(0) if _captionof_numbers else ""
+        head = f"**{word} {number}.**" if number else f"**{word}.**"
+        return f"\n\n{head} {args[1].strip()}\n\n"
+
+    tex = replace_command(tex, "captionof", 2, render_captionof, has_optional=True)
 
     # Lists.
     for env in ("itemize", "enumerate", "description", "compactitem"):
@@ -952,21 +1246,62 @@ def tex_to_markdown(tex: str, bib_labels: dict[str, str] | None = None) -> str:
                  "citeyear", "Citep", "Citet", "parencite", "textcite", "autocite"):
         def render_cite(args: list[str], _optional: str | None) -> str:
             keys = [key.strip() for key in args[0].split(",") if key.strip()]
-            return "[" + "; ".join(_short_citation(key, labels) for key in keys) + "]"
+            # Parentheses rather than brackets: `[Ho 2020] (see Fig. 3)` is a link
+            # to a Markdown reader, and the text disappears into an anchor.
+            return "(" + "; ".join(_short_citation(key, labels) for key in keys) + ")"
 
         tex = replace_command(tex, name, 1, render_cite, has_optional=True)
 
-    for name in ("ref", "eqref", "autoref", "Cref", "cref", "pageref", "nameref"):
-        tex = replace_command(tex, name, 1, lambda args, _o: f"({args[0]})")
+    def render_ref(args: list[str], _optional: str | None) -> str:
+        found = [numbers.get(key.strip(), "") for key in args[0].split(",")]
+        return ", ".join(number for number in found if number) or "?"
+
+    def render_named_ref(args: list[str], _optional: str | None) -> str:
+        """``\\cref`` prints the word as well, so the prose around it omits it."""
+        keys = [key.strip() for key in args[0].split(",") if key.strip()]
+        word = next((_REF_WORDS[prefix] for key in keys
+                     if (prefix := key.split(":")[0].lower()) in _REF_WORDS), "")
+        found = [number for key in keys if (number := numbers.get(key, ""))]
+        if not found:
+            return word or "?"
+        return f"{word} {', '.join(found)}".strip()
+
+    for name in ("ref", "eqref", "Ref"):
+        tex = replace_command(tex, name, 1, render_ref)
+        # \ref*{...} suppresses the hyperlink and is otherwise the same.
+        tex = replace_command(tex, f"{name}*", 1, render_ref)
+    for name in ("autoref", "Cref", "cref", "labelcref", "Autoref", "vref"):
+        tex = replace_command(tex, name, 1, render_named_ref)
+        tex = replace_command(tex, f"{name}*", 1, render_named_ref)
+    for name in ("pageref", "nameref"):
+        tex = replace_command(tex, name, 1, lambda _args, _o: "?")
 
     tex = replace_command(tex, "footnote", 1, lambda args, _o: f" ({args[0]})", has_optional=True)
+    tex = replace_command(tex, "footnotetext", 1, lambda args, _o: f" ({args[0]})",
+                          has_optional=True)
     tex = replace_command(tex, "href", 2, lambda args, _o: f"{args[1]} ({args[0]})")
+    # \hyperref[sec:x]{the label text} already reads well without the link.
+    tex = replace_command(tex, "hyperref", 1, lambda args, _o: args[0], has_optional=True)
     tex = replace_command(tex, "url", 1, lambda args, _o: args[0])
     tex = replace_command(tex, "texttt", 1, lambda args, _o: f"`{args[0]}`")
     tex = replace_command(tex, "title", 1, lambda args, _o: f"\n\n# {args[0]}\n\n", has_optional=True)
 
-    for name, marker in _TEXT_STYLE.items():
-        tex = replace_command(tex, name, 1, lambda args, _o, m=marker: f"{m}{args[0]}{m}")
+    def render_style(args: list[str], _optional: str | None, marker: str) -> str:
+        """Emphasis markers must hug the text: ``** bold **`` is not bold."""
+        core = args[0].strip()
+        if not core or not marker:
+            return args[0]
+        lead = " " if args[0][:1].isspace() else ""
+        trail = " " if args[0][-1:].isspace() else ""
+        return f"{lead}{marker}{core}{marker}{trail}"
+
+    # Twice, because one left-to-right pass rewrites the outer command of a
+    # nested \textit{\textit{...}} and then scans past what is now inside it.
+    for _pass in range(2):
+        for name, marker in _TEXT_STYLE.items():
+            tex = replace_command(
+                tex, name, 1, lambda args, _o, m=marker: render_style(args, _o, m)
+            )
 
     tex = replace_command(tex, "textcolor", 2, lambda args, _o: args[1])
 
@@ -975,16 +1310,35 @@ def tex_to_markdown(tex: str, bib_labels: dict[str, str] | None = None) -> str:
     tex = replace_command(tex, "rule", 2, lambda _args, _o: " ", has_optional=True)
     tex = replace_command(tex, "specialrule", 3, lambda _args, _o: " ")
     tex = re.sub(r"\\c(?:line|midrule)\s*(?:\([^)]*\))?\s*(?:\{[^}]*\})?", " ", tex)
-    # \multirow{2}{*}{text} and the \multirow{2}*{text} spelling both occur.
-    tex = re.sub(r"\\multirow\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}\s*(?:\*|\{[^{}]*\})\s*", "", tex)
+    # \multirow{2}{*}{text}, \multirow{2}*{text} and \multirow{2}[0]*{text} all
+    # occur; the row count and the width are scaffolding, the text is content.
+    tex = re.sub(
+        r"\\multirow\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}\s*(?:\[[^\]]*\])?\s*"
+        r"(?:\*|\{[^{}]*\})\s*",
+        "",
+        tex,
+    )
 
-    for name in ("shortstack", "makecell", "thead", "smash", "fbox", "framebox", "text"):
+    for name in ("shortstack", "makecell", "thead", "smash", "fbox", "framebox", "text",
+                 "centerline", "textmd", "textup"):
         tex = replace_command(tex, name, 1, lambda args, _o: args[0], has_optional=True)
-    for name in ("raisebox", "scalebox", "rotatebox", "parbox", "tabincell", "adjustbox"):
+    for name in ("raisebox", "scalebox", "rotatebox", "parbox", "tabincell", "adjustbox",
+                 "colorbox"):
         tex = replace_command(tex, name, 2, lambda args, _o: args[1], has_optional=True)
+
+    # An inline \tikz ... ; draws a coloured dot in a table legend. The drawing
+    # cannot survive, and its coordinates must not be left behind as text.
+    tex = re.sub(r"\\tikz\b[^;\n]*;", "", tex)
+
+    # \definecolor{shade}{rgb}{0.9,0.5,0.5} keeps none of its three arguments;
+    # taking only the first leaves "rgb 0.9,0.5,0.5" sitting in the text.
+    for name, count in (("definecolor", 3), ("newtheorem", 2), ("newcolumntype", 2)):
+        tex = replace_command(tex, name, count, lambda _args, _o: "", has_optional=True)
 
     for name in _DROP_COMMANDS_ONEARG:
         tex = replace_command(tex, name, 1, lambda _args, _o: "", has_optional=True)
+        # Springer's class spells the metadata commands \author*[1]{...}.
+        tex = replace_command(tex, f"{name}*", 1, lambda _args, _o: "", has_optional=True)
     for name in _DROP_COMMANDS_NOARG:
         tex = re.sub(r"\\" + name + r"(?![a-zA-Z@])\s*", " ", tex)
 
@@ -998,6 +1352,21 @@ def tex_to_markdown(tex: str, bib_labels: dict[str, str] | None = None) -> str:
     tex = _strip_group_braces(tex)
     for sentinel, target in _UNESCAPES.items():
         tex = tex.replace(sentinel, target)
+    tex = vault.restore(tex)
+
+    # Many papers write their own parentheses around \cite, which then reads as
+    # "((Ho 2020))". Keep one pair.
+    tex = re.sub(r"\(\s*\(([^()\n]*)\)\s*\)", r"(\1)", tex)
+    tex = re.sub(r"\(\s*\)", "", tex)
+    # Emphasis only works when the markers touch the text, and what sat between
+    # them may have been a glyph command that is only now gone.
+    tex = _EMPHASIS_SPAN.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(1)}", tex)
+    # A reference we could not number reads "see Figure ?", which looks like a
+    # broken conversion. The word alone is honest and still points somewhere.
+    tex = _ORPHAN_REF.sub(r"\1", tex)
+    # A macro standing for the method name expands to `VACE`, and the space the
+    # author left after it now sits between the name and the comma.
+    tex = re.sub(r"(`|\*\*|\*)[ \t]+([,.;:!?])", r"\1\2", tex)
 
     # Collapse whitespace without destroying paragraph structure.
     tex = re.sub(r"[ \t]+", " ", tex)
@@ -1190,7 +1559,8 @@ def build_fulltext(source_dir: Path) -> tuple[str, Path | None]:
         return "", None
 
     flattened = flatten_tex(root, source_dir)
-    macros = collect_macros(flattened)
+    # The paper's own definitions win over anything the conference style says.
+    macros = collect_style_macros(source_dir) | collect_macros(flattened)
 
     body_start = flattened.find(r"\begin{document}")
     preamble = flattened[:body_start] if body_start >= 0 else ""

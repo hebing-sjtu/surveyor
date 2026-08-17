@@ -35,6 +35,9 @@ class PaperMeta(BaseModel):
     # one method's problem and results.
     kind: Literal["paper", "survey"] = "paper"
     has_source: bool = False
+    # Which sub-library this paper belongs to. Empty means unfiled, and a
+    # library that never files anything behaves exactly as it did before.
+    collection: str = ""
     # Free-form labels the user can add; topics are LLM-assigned.
     tags: list[str] = Field(default_factory=list)
     ingested_at: str = Field(default_factory=utcnow)

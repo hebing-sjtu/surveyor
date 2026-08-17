@@ -26,6 +26,7 @@ dependencies = [
     "uvicorn>=0.29",
     "cryptography>=42.0",
     "markdown-it-py>=3.0",
+    "latex2mathml>=3.77",
 ]
 
 # Each platform's official SDK, needed only to hold a long connection open:

@@ -55,6 +55,11 @@ enabled = false
 # Use open.larksuite.com instead for Lark international. The long connection
 # derives its own address from this.
 base_url = "https://open.feishu.cn/open-apis"
+# Feishu cards understand a little Markdown and no tables at all, so a reply
+# that has tables or formulas is drawn with the machine's own browser and sent
+# as a picture. "auto" pictures only those; "always" pictures everything;
+# "never" keeps to text. Point SURVEYOR_BROWSER at a browser if none is found.
+send_as_image = "auto"
 
 [wecom]
 # As above: gates `surveyor wecom-connect` and the /webhook/wecom callback alike.
@@ -62,3 +67,7 @@ enabled = false
 # Where `surveyor wecom-connect` dials. Public WeCom by default; a private
 # deployment publishes its own gateway on the admin console.
 ws_url = "wss://openws.work.weixin.qq.com"
+# As for Feishu. Note that a 智能机器人 on a long connection can only send
+# markdown or a template card, so this applies to the self-built app and the
+# group-robot webhook, not to `surveyor wecom-connect`.
+send_as_image = "auto"

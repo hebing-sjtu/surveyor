@@ -19,6 +19,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from ..bots.imaging import available as image_rendering_available
 from ..config import (
     Language,
     Settings,
@@ -30,10 +31,12 @@ from ..config import (
 from ..knowledge import topic_index, write_all_topic_digests, write_glossary, write_overview
 from ..llm import LLMClient, LLMError
 from ..models import SurveyReference
+from ..paths import knowledge_root, slugify
 from ..pipeline import harvest_survey, ingest_inputs, rebuild_all
 from ..qa import ask as ask_library
 from ..qa import compare as compare_papers
-from ..store import PaperStore, write_index
+from ..render import to_html
+from ..store import PaperStore, write_all_indexes, write_index
 from ..summarize import summarize_paper
 from ..survey import (
     collect_references,
@@ -47,7 +50,6 @@ from ..survey import (
 from ..userconfig import apply as apply_settings
 from ..userconfig import read_env_file, set_library_root
 from .jobs import JobRunner
-from .render import to_html
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +88,7 @@ def _paper_row(store: PaperStore, paper_id: str) -> dict[str, Any] | None:
         "authors": meta.author_line,
         "published": (meta.published or "")[:10],
         "kind": meta.kind,
+        "collection": meta.collection,
         "has_source": meta.has_source,
         "has_note": summary is not None,
         "one_liner": summary.one_liner if summary else "",
@@ -130,6 +133,8 @@ def _settings_payload(settings: Settings) -> dict[str, Any]:
         "bots": {
             "feishu_enabled": settings.feishu.enabled,
             "wecom_enabled": settings.wecom.enabled,
+            "send_as_image": settings.feishu.send_as_image,
+            "can_draw": image_rendering_available(),
             "port": settings.server.port,
             "feishu_app_id": env.get("FEISHU_APP_ID", ""),
             "has_feishu_secret": bool(env.get("FEISHU_APP_SECRET")),
@@ -251,11 +256,17 @@ def create_app() -> FastAPI:
 
     # ---------------------------------------------------------- library
     @app.get("/api/papers")
-    def papers(kind: str = Query("all"), q: str = Query("")) -> dict[str, Any]:
+    def papers(
+        kind: str = Query("all"),
+        q: str = Query(""),
+        collection: str | None = Query(None),
+    ) -> dict[str, Any]:
         store = _store()
         rows = [row for pid in store.list_ids() if (row := _paper_row(store, pid))]
         if kind in ("paper", "survey"):
             rows = [row for row in rows if row["kind"] == kind]
+        if collection is not None:
+            rows = [row for row in rows if row["collection"] == collection]
         if q:
             needle = q.lower()
             rows = [
@@ -267,6 +278,29 @@ def create_app() -> FastAPI:
             ]
         rows.sort(key=lambda row: (row["published"] or ""), reverse=True)
         return {"papers": rows}
+
+    # ------------------------------------------------------ collections
+    @app.get("/api/collections")
+    def collections() -> dict[str, Any]:
+        store = _store()
+        return {
+            "collections": [
+                {"name": name, "papers": count} for name, count in store.list_collections()
+            ],
+            "unfiled": sum(1 for _ in store.iter_records("")),
+        }
+
+    @app.post("/api/collections/assign")
+    def assign_collection(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        store = _store()
+        paper_ids = payload.get("papers") or []
+        if not paper_ids:
+            raise _error(400, "Select the papers to file first.")
+        name = (payload.get("collection") or "").strip()
+        moved = [pid for pid in paper_ids if store.set_collection(pid, name)]
+        if moved:
+            write_all_indexes(store)
+        return {"moved": moved, "collection": name}
 
     @app.get("/api/papers/{paper_id}")
     def paper_detail(paper_id: str) -> dict[str, Any]:
@@ -325,17 +359,24 @@ def create_app() -> FastAPI:
         kind = payload.get("kind") or None
         summarize = bool(payload.get("summarize", True))
         language = _language(payload.get("language"))
+        collection = (payload.get("collection") or "").strip()
         label = f"Import {len(inputs)} item(s)"
 
         def work(progress):
+            store = _store()
             results = ingest_inputs(
-                _store(),
+                store,
                 inputs,
                 summarize=summarize,
                 language=language,
                 kind=kind if kind in ("paper", "survey") else None,
                 progress=progress,
             )
+            if collection:
+                for result in results:
+                    if result.paper_id:
+                        store.set_collection(result.paper_id, collection)
+                write_all_indexes(store)
             return [
                 {
                     "paper_id": result.paper_id,
@@ -496,17 +537,28 @@ def create_app() -> FastAPI:
     def merge(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         field = payload.get("field") or ""
         language = _language(payload.get("language"))
+        collection = (payload.get("collection") or "").strip() or None
 
         def work(progress):
             store = _store()
             grouped = group_surveys_by_field(store)
+            if collection is not None:
+                filed = {
+                    record.meta.paper_id for record in store.iter_records(collection)
+                }
+                grouped = {
+                    name: [pid for pid in ids if pid in filed]
+                    for name, ids in grouped.items()
+                }
             targets = {field: grouped.get(field, [])} if field else grouped
             written = []
             for name, ids in targets.items():
                 if not ids:
                     continue
                 progress(f"{name}: reconciling {len(ids)} survey(s)")
-                path = merge_surveys(store, ids, field_name=name, language=language)
+                path = merge_surveys(
+                    store, ids, field_name=name, language=language, collection=collection
+                )
                 written.append(str(path))
             if not written:
                 raise ValueError("No surveys with notes to merge yet.")
@@ -556,22 +608,30 @@ def create_app() -> FastAPI:
 
     # --------------------------------------------------------- knowledge
     @app.get("/api/knowledge")
-    def knowledge() -> dict[str, Any]:
+    def knowledge(collection: str | None = Query(None)) -> dict[str, Any]:
         store = _store()
-        directory = store.settings.knowledge_dir
+        root = store.settings.knowledge_dir
+        # Documents belonging to a collection live one level down. Listing the
+        # library therefore means everything at the top level only, so a
+        # sub-library's pages do not show up twice.
+        scoped = knowledge_root(store.settings, collection)
+        folders = {slugify(name) for name, _count in store.list_collections()}
         documents = [
             {
-                "name": str(path.relative_to(directory)),
+                "name": str(path.relative_to(root)),
+                "folder": str(path.parent.relative_to(scoped)) if path.parent != scoped else "",
                 "title": _first_heading(path) or path.stem,
                 "modified": int(path.stat().st_mtime),
             }
-            for path in sorted(directory.rglob("*.md"))
+            for path in sorted(scoped.rglob("*.md"))
+            if collection or path.relative_to(root).parts[0] not in folders
         ]
         return {
             "documents": documents,
+            "collection": (collection or ""),
             "topics": [
                 {"name": topic, "papers": len(records)}
-                for topic, records in topic_index(store).items()
+                for topic, records in topic_index(store, collection).items()
             ],
         }
 
@@ -590,24 +650,32 @@ def create_app() -> FastAPI:
         what = payload.get("what", "overview")
         language = _language(payload.get("language"))
         topic = payload.get("topic") or None
+        collection = (payload.get("collection") or "").strip() or None
 
         def work(progress):
             store = _store()
             if what == "glossary":
                 progress("collecting concepts from every note")
-                return {"written": [str(write_glossary(store))]}
+                return {"written": [str(write_glossary(store, collection))]}
             if what == "index":
-                return {"written": [str(write_index(store))]}
+                paths = [write_index(store, collection)] if collection \
+                    else write_all_indexes(store)
+                return {"written": [str(path) for path in paths]}
             if what == "digests":
                 progress("synthesizing topic digests")
                 paths = write_all_topic_digests(
-                    store, min_papers=1 if topic else 2, language=language, only=topic
+                    store, min_papers=1 if topic else 2, language=language, only=topic,
+                    collection=collection,
                 )
                 if not paths:
                     raise ValueError("No topic has enough summarized papers yet.")
                 return {"written": [str(path) for path in paths]}
-            progress("writing the library overview")
-            return {"written": [str(write_overview(store, language=language))]}
+            progress("writing the overview")
+            return {
+                "written": [
+                    str(write_overview(store, language=language, collection=collection))
+                ]
+            }
 
         return _job(runner, f"Build {what}", work)
 

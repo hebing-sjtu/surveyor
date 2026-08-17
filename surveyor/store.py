@@ -30,6 +30,7 @@ from .models import (
     SurveyNote,
     SurveyReference,
 )
+from .paths import knowledge_root, note_link, slugify
 
 log = logging.getLogger(__name__)
 
@@ -193,11 +194,36 @@ class PaperStore:
             fulltext_chars=len(self.load_fulltext(paper_id)),
         )
 
-    def iter_records(self) -> Iterator[PaperRecord]:
+    def iter_records(self, collection: str | None = None) -> Iterator[PaperRecord]:
+        """Every record, or only those filed under ``collection``.
+
+        ``None`` means the whole library; ``""`` means the unfiled papers.
+        """
         for paper_id in self.list_ids():
             record = self.load_record(paper_id)
-            if record is not None:
+            if record is None:
+                continue
+            if collection is None or record.meta.collection == collection:
                 yield record
+
+    # ----------------------------------------------------------- collections
+    def list_collections(self) -> list[tuple[str, int]]:
+        """Collection names with their paper counts, largest first."""
+        counts: dict[str, int] = {}
+        for paper_id in self.list_ids():
+            meta = self.load_meta(paper_id)
+            name = (meta.collection if meta else "").strip()
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+        return sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))
+
+    def set_collection(self, paper_id: str, collection: str) -> bool:
+        meta = self.load_meta(paper_id)
+        if meta is None:
+            return False
+        meta.collection = (collection or "").strip()
+        self.save_meta(meta)
+        return True
 
     def delete(self, paper_id: str) -> bool:
         directory = self.paper_dir(paper_id)
@@ -276,36 +302,57 @@ def _split_paragraphs(body: str, target_chars: int) -> list[str]:
     return pieces
 
 
-def write_index(store: PaperStore) -> Path:
-    """Refresh ``knowledge/index.md``, the human-facing table of contents."""
+def write_index(store: PaperStore, collection: str | None = None) -> Path:
+    """Refresh an ``index.md``: the whole library, or one collection of it."""
     records = sorted(
-        store.iter_records(),
+        store.iter_records(collection),
         key=lambda record: (record.meta.published or "", record.meta.paper_id),
         reverse=True,
     )
     surveys = sum(1 for record in records if record.meta.kind == "survey")
+    directory = knowledge_root(store.settings, collection)
+    name = (collection or "").strip()
+
     lines = [
-        "# Reading list",
+        f"# {name}" if name else "# Reading list",
         "",
         f"{len(records)} entries, {surveys} of them surveys.",
         "",
-        "| Paper | Kind | Title | Note | Topics |",
-        "| --- | --- | --- | --- | --- |",
     ]
+    if not name:
+        collections = store.list_collections()
+        if collections:
+            lines += ["## Collections", ""]
+            lines += [
+                f"- [{label}]({slugify(label)}/index.md) — {count} "
+                f"{'paper' if count == 1 else 'papers'}"
+                for label, count in collections
+            ]
+            lines += ["", "## All papers", ""]
+
+    lines += ["| Paper | Kind | Title | Note | Topics |", "| --- | --- | --- | --- | --- |"]
     for record in records:
         meta, summary = record.meta, record.summary
         note_file = "survey.md" if meta.kind == "survey" else "summary.md"
-        link = f"[{meta.paper_id}](../papers/{meta.paper_id}/{note_file})"
+        target = note_link(store.settings, meta.paper_id, note_file, directory)
         topics = ", ".join((summary.topics if summary else [])[:3]) or "-"
         title = meta.display_title.replace("|", "\\|")[:90]
         lines.append(
-            f"| {link} | {meta.kind} | {title} | {'yes' if summary else 'no'} | {topics} |"
+            f"| [{meta.paper_id}]({target}) | {meta.kind} | {title} | "
+            f"{'yes' if summary else 'no'} | {topics} |"
         )
 
-    path = store.settings.knowledge_dir / "index.md"
+    path = directory / "index.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def write_all_indexes(store: PaperStore) -> list[Path]:
+    """The library index plus one per collection."""
+    written = [write_index(store)]
+    written.extend(write_index(store, name) for name, _count in store.list_collections())
+    return written
 
 
 def save_json(path: Path, payload: object) -> None:

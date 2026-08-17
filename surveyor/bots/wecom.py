@@ -8,6 +8,8 @@ empty and the real reply is pushed through the message API.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import logging
 import threading
@@ -19,12 +21,16 @@ import httpx
 
 from ..config import WecomConfig
 from .crypto import CryptoError, wecom_decrypt, wecom_signature
+from .imaging import RenderError, markdown_to_png, should_draw
+from .imaging import pages as image_pages
 from .router import BotContext, split_message
 
 log = logging.getLogger(__name__)
 
 # WeCom caps markdown bodies at 4096 bytes; stay clear of the edge.
 MESSAGE_LIMIT = 3800
+# A group robot embeds the picture in the request, and rejects it past 2 MB.
+WEBHOOK_IMAGE_LIMIT = 2 * 1024 * 1024
 
 
 class WecomError(RuntimeError):
@@ -63,14 +69,26 @@ class WecomClient:
             self._expires_at = time.time() + max(int(data.get("expires_in", 7200)) - 60, 60)
             return self._token
 
+    def upload_image(self, png: bytes) -> str:
+        """Upload a temporary image and return its media id (valid for 3 days)."""
+        response = httpx.post(
+            f"{self.config.base_url}/media/upload",
+            params={"access_token": self.token(), "type": "image"},
+            files={"media": ("reply.png", png, "image/png")},
+            timeout=60,
+        )
+        data = response.json()
+        if data.get("errcode") != 0:
+            raise WecomError(f"image upload failed: {data}")
+        media_id = data.get("media_id")
+        if not media_id:
+            raise WecomError("image upload returned no media_id")
+        return media_id
+
     def send(self, user_id: str, text: str, *, chat_id: str = "") -> None:
-        """Push a markdown reply to a user, or to an app chat when given one."""
-        for piece in split_message(text, MESSAGE_LIMIT):
-            payload: dict[str, Any] = {
-                "msgtype": "markdown",
-                "agentid": int(self.config.agent_id or 0),
-                "markdown": {"content": piece},
-            }
+        """Push a reply to a user, or to an app chat when given one."""
+        for body in self._bodies(text):
+            payload: dict[str, Any] = {"agentid": int(self.config.agent_id or 0), **body}
             if chat_id:
                 payload["chatid"] = chat_id
                 endpoint = "appchat/send"
@@ -89,18 +107,59 @@ class WecomClient:
                 log.error("wecom send failed: %s", data)
                 raise WecomError(f"send failed: {data}")
 
+    def _bodies(self, text: str) -> list[dict[str, Any]]:
+        """Turn one reply into the message bodies that carry it."""
+        if should_draw(text, self.config.send_as_image):
+            try:
+                return [
+                    {"msgtype": "image", "image": {"media_id": self.upload_image(png)}}
+                    for png in [markdown_to_png(piece) for piece in image_pages(text)]
+                ]
+            except (RenderError, WecomError, httpx.HTTPError) as exc:
+                # A picture is nicer, but an unformatted answer beats no answer.
+                log.warning("falling back to text: %s", exc)
+
+        return [
+            {"msgtype": "markdown", "markdown": {"content": piece}}
+            for piece in split_message(text, MESSAGE_LIMIT)
+        ]
+
     def push_webhook(self, text: str) -> None:
         """Post to a group robot's incoming webhook, used for scheduled digests."""
         url = self.config.webhook_url
         if not url:
             raise WecomError("WECOM_WEBHOOK_URL is not set")
-        for piece in split_message(text, MESSAGE_LIMIT):
-            response = httpx.post(
-                url, json={"msgtype": "markdown", "markdown": {"content": piece}}, timeout=30
-            )
+
+        for payload in self._webhook_payloads(text):
+            response = httpx.post(url, json=payload, timeout=60)
             data = response.json()
             if data.get("errcode") != 0:
                 raise WecomError(f"webhook push failed: {data}")
+
+    def _webhook_payloads(self, text: str) -> list[dict[str, Any]]:
+        """A group robot takes the image inline, base64 encoded, up to 2 MB."""
+        if should_draw(text, self.config.send_as_image):
+            try:
+                payloads = []
+                for piece in image_pages(text):
+                    png = markdown_to_png(piece)
+                    if len(png) > WEBHOOK_IMAGE_LIMIT:
+                        raise RenderError(f"image is {len(png) // 1024} KB, over the cap")
+                    payloads.append({
+                        "msgtype": "image",
+                        "image": {
+                            "base64": base64.b64encode(png).decode("ascii"),
+                            "md5": hashlib.md5(png).hexdigest(),
+                        },
+                    })
+                return payloads
+            except RenderError as exc:
+                log.warning("falling back to text: %s", exc)
+
+        return [
+            {"msgtype": "markdown", "markdown": {"content": piece}}
+            for piece in split_message(text, MESSAGE_LIMIT)
+        ]
 
 
 def verify_url(config: WecomConfig, params: dict[str, str]) -> str:

@@ -21,6 +21,7 @@ from .knowledge import (
     write_overview,
 )
 from .llm import LLMClient
+from .paths import knowledge_root
 from .pipeline import (
     adopt_directory,
     harvest_survey,
@@ -30,7 +31,7 @@ from .pipeline import (
 )
 from .qa import ask as ask_library
 from .qa import compare as compare_papers
-from .store import PaperStore, write_index
+from .store import PaperStore, write_all_indexes, write_index
 from .summarize import summarize_paper
 from .survey import (
     collect_references,
@@ -119,6 +120,9 @@ def add(
     no_summary: bool = typer.Option(False, "--no-summary", help="Download and convert only"),
     force: bool = typer.Option(False, "--force", help="Re-download and re-summarize"),
     lang: Optional[str] = typer.Option(None, "--lang", help="zh, en or bilingual"),
+    collection: Optional[str] = typer.Option(
+        None, "--collection", "-c", help="File the new papers under this sub-library"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Add papers from ids, URLs, or a list file."""
@@ -139,6 +143,11 @@ def add(
         language=_language(lang),
         progress=_progress,
     )
+    if collection:
+        for result in results:
+            if result.paper_id:
+                store.set_collection(result.paper_id, collection)
+        write_all_indexes(store)
     _report(results)
 
 
@@ -752,11 +761,17 @@ def compare(
 # Knowledge
 # ---------------------------------------------------------------------------
 
+_COLLECTION = typer.Option(
+    None, "--collection", "-c",
+    help="Limit to one sub-library, and write into knowledge/<collection>/",
+)
+
+
 @app.command()
-def topics() -> None:
+def topics(collection: Optional[str] = _COLLECTION) -> None:
     """List the topics the library has been grouped into."""
     store = _store()
-    grouped = topic_index(store)
+    grouped = topic_index(store, collection)
     if not grouped:
         console.print("No topics yet. Summarize some papers first.")
         return
@@ -765,7 +780,7 @@ def topics() -> None:
     table.add_column("Papers", justify="right")
     table.add_column("Digest")
     for topic, records in grouped.items():
-        path = store.settings.knowledge_dir / "topics" / f"{slugify(topic)}.md"
+        path = knowledge_root(store.settings, collection) / "topics" / f"{slugify(topic)}.md"
         table.add_row(topic, str(len(records)), "yes" if path.is_file() else "-")
     console.print(table)
 
@@ -775,6 +790,7 @@ def digest(
     topic: Optional[str] = typer.Option(None, "--topic", help="Only this topic"),
     min_papers: int = typer.Option(2, "--min-papers"),
     lang: Optional[str] = typer.Option(None, "--lang"),
+    collection: Optional[str] = _COLLECTION,
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Write cross-paper syntheses into knowledge/topics/."""
@@ -782,7 +798,8 @@ def digest(
     store = _store()
     with console.status("Synthesizing…"):
         written = write_all_topic_digests(
-            store, min_papers=min_papers, language=_language(lang), only=topic
+            store, min_papers=min_papers, language=_language(lang), only=topic,
+            collection=collection,
         )
     if not written:
         console.print(
@@ -797,31 +814,108 @@ def digest(
 @app.command()
 def overview(
     lang: Optional[str] = typer.Option(None, "--lang"),
+    collection: Optional[str] = _COLLECTION,
     show_it: bool = typer.Option(True, "--show/--no-show"),
 ) -> None:
-    """Write the library-wide overview page."""
+    """Write the overview page for the library, or for one collection."""
     store = _store()
     with console.status("Synthesizing…"):
-        path = write_overview(store, language=_language(lang))
+        path = write_overview(store, language=_language(lang), collection=collection)
     console.print(f"[green]wrote[/green] {path.relative_to(store.settings.root)}")
     if show_it:
         console.print(Markdown(path.read_text(encoding="utf-8")))
 
 
 @app.command()
-def glossary() -> None:
+def glossary(collection: Optional[str] = _COLLECTION) -> None:
     """Write the concept glossary."""
     store = _store()
-    path = write_glossary(store)
+    path = write_glossary(store, collection)
     console.print(f"[green]wrote[/green] {path.relative_to(store.settings.root)}")
 
 
 @app.command()
-def index() -> None:
-    """Refresh knowledge/index.md."""
+def index(collection: Optional[str] = _COLLECTION) -> None:
+    """Refresh index.md for the library and for every collection."""
     store = _store()
-    path = write_index(store)
-    console.print(f"[green]wrote[/green] {path.relative_to(store.settings.root)}")
+    written = [write_index(store, collection)] if collection else write_all_indexes(store)
+    for path in written:
+        console.print(f"[green]wrote[/green] {path.relative_to(store.settings.root)}")
+
+
+# ---------------------------------------------------------------------------
+# Collections
+# ---------------------------------------------------------------------------
+
+collection_app = typer.Typer(
+    help="Sub-libraries: keep unrelated research areas apart.", no_args_is_help=True
+)
+app.add_typer(collection_app, name="collection")
+
+
+@collection_app.command("list")
+def collection_list() -> None:
+    """Show the collections and how many papers are in each."""
+    store = _store()
+    collections = store.list_collections()
+    unfiled = sum(1 for _ in store.iter_records(""))
+    if not collections:
+        console.print(
+            f"No collections yet; all {unfiled} papers are unfiled.\n"
+            "Create one with: surveyor collection add \"Video generation\" 2411.00769v3"
+        )
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Collection")
+    table.add_column("Papers", justify="right")
+    table.add_column("Knowledge folder")
+    for name, count in collections:
+        folder = knowledge_root(store.settings, name)
+        table.add_row(
+            name, str(count),
+            str(folder.relative_to(store.settings.root)) if folder.is_dir() else "-",
+        )
+    if unfiled:
+        table.add_row("[dim](unfiled)[/dim]", str(unfiled), "knowledge")
+    console.print(table)
+
+
+@collection_app.command("add")
+def collection_add(
+    name: str = typer.Argument(..., help="Collection name"),
+    papers: list[str] = typer.Argument(..., help="Paper ids, titles or id fragments"),
+) -> None:
+    """File papers under a collection."""
+    _move(name, papers)
+
+
+@collection_app.command("remove")
+def collection_remove(
+    papers: list[str] = typer.Argument(..., help="Paper ids, titles or id fragments"),
+) -> None:
+    """Unfile papers, putting them back in the library root."""
+    _move("", papers)
+
+
+def _move(name: str, papers: list[str]) -> None:
+    store = _store()
+    moved = 0
+    for query in papers:
+        matches = store.resolve(query)
+        if len(matches) != 1:
+            console.print(f"[yellow]{query}[/yellow]: {_ambiguous(matches)}")
+            continue
+        store.set_collection(matches[0], name)
+        moved += 1
+        console.print(f"[green]{matches[0]}[/green] → {name or '(unfiled)'}")
+    if moved:
+        write_all_indexes(store)
+
+
+def _ambiguous(matches: list[str]) -> str:
+    if not matches:
+        return "no such paper"
+    return "matches " + ", ".join(matches[:5])
 
 
 # ---------------------------------------------------------------------------

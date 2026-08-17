@@ -55,6 +55,10 @@
             <option value="survey">Survey</option>
           </select>
         </label>
+        <label style="flex:0 0 210px">
+          <span>Into collection</span>
+          <input type="text" id="import-collection" list="collection-names" placeholder="optional">
+        </label>
         <label class="check" style="flex:0 0 auto; margin-bottom:0">
           <input type="checkbox" id="import-summarize" checked> Write notes with the model
         </label>
@@ -70,8 +74,40 @@
         <option value="paper">Papers</option>
         <option value="survey">Surveys</option>
       </select>
+      <select id="library-collection" title="Sub-library">
+        <option value="">All collections</option>
+      </select>
+      <button class="btn" id="library-file">File papers…</button>
     </div>
     <div id="library-list"></div>
+
+    <div class="card hidden" id="file-panel" style="margin-top:18px">
+      <h2 style="margin-top:0">File papers into a collection</h2>
+      <p class="small muted">A collection is a sub-library. Its syntheses are written to
+        <span class="mono">knowledge/&lt;collection&gt;/</span>, so unrelated areas do not get
+        averaged into one overview.</p>
+      <label>
+        <span>Papers</span>
+        <div class="picker" id="file-picker">
+          <div class="picker-head">
+            <input type="search" class="picker-search" placeholder="Search by title, id or author">
+            <span class="picker-count small muted"></span>
+            <button type="button" class="btn small picker-clear hidden">Clear</button>
+          </div>
+          <div class="picker-chips"></div>
+          <div class="picker-list"></div>
+        </div>
+      </label>
+      <div class="row tight">
+        <label style="flex:1 1 240px; margin-bottom:0">
+          <span>Collection</span>
+          <input type="text" id="file-name" list="collection-names" placeholder="Video generation">
+          <datalist id="collection-names"></datalist>
+        </label>
+        <button class="btn primary" id="file-go" style="flex:0 0 auto">File them</button>
+        <button class="btn" id="file-clear" style="flex:0 0 auto" title="Leave the collection empty to unfile">Unfile</button>
+      </div>
+    </div>
   </section>
 
   <!-- ------------------------------------------------------------- paper -->
@@ -157,13 +193,21 @@
         <span>Question</span>
         <textarea id="ask-question" placeholder="Which control signals do these surveys agree are solved, and which are still open?"></textarea>
       </label>
+      <label>
+        <span>Scope</span>
+        <div class="picker" id="ask-picker">
+          <div class="picker-head">
+            <input type="search" class="picker-search" placeholder="Search by title, id or author">
+            <span class="picker-count small muted"></span>
+            <button type="button" class="btn small picker-clear hidden">Clear</button>
+          </div>
+          <div class="picker-chips"></div>
+          <div class="picker-list"></div>
+        </div>
+      </label>
       <div class="row tight">
-        <label style="flex:1 1 260px">
-          <span>Scope</span>
-          <select id="ask-scope"><option value="">The whole library</option></select>
-        </label>
-        <div style="flex:1"></div>
-        <button class="btn primary" id="ask-go" style="flex:0 0 auto">Ask</button>
+        <button class="btn primary" id="ask-go">Ask</button>
+        <button class="btn" id="ask-compare" title="Needs at least two papers selected">Compare the selected papers</button>
       </div>
     </div>
     <div id="ask-answers"></div>
@@ -174,8 +218,14 @@
     <h1>Knowledge</h1>
     <p class="lede">What your reading adds up to: syntheses across papers rather than one note at a time.</p>
     <div class="card">
+      <label style="margin-bottom:12px">
+        <span>Which library</span>
+        <select id="knowledge-collection">
+          <option value="">The whole library</option>
+        </select>
+      </label>
       <div class="actions">
-        <button class="btn" data-build="overview">Library overview</button>
+        <button class="btn" data-build="overview">Overview</button>
         <button class="btn" data-build="digests">Topic digests</button>
         <button class="btn" data-build="glossary">Concept glossary</button>
         <button class="btn" data-build="merge">Reconcile surveys into a field map</button>
@@ -257,10 +307,19 @@
         <input type="checkbox" id="set-feishu-enabled"> Feishu / Lark
         <span class="small muted" id="set-feishu-state"></span>
       </label>
-      <label class="check" style="margin-bottom:0">
+      <label class="check">
         <input type="checkbox" id="set-wecom-enabled"> WeCom (企业微信)
         <span class="small muted" id="set-wecom-state"></span>
       </label>
+      <label style="margin:14px 0 0">
+        <span>Send replies as pictures</span>
+        <select id="set-send-as-image">
+          <option value="auto">When the reply has tables or formulas (recommended)</option>
+          <option value="always">Always</option>
+          <option value="never">Never — plain text only</option>
+        </select>
+      </label>
+      <p class="small muted" style="margin:8px 0 0" id="set-image-state"></p>
       <p class="small muted" id="set-bots-hint" style="margin:12px 0 0"></p>
     </div>
 

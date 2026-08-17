@@ -653,14 +653,16 @@ def merge_surveys(
     field_name: str = "",
     language: Language | None = None,
     client: LLMClient | None = None,
+    collection: str | None = None,
 ) -> Path:
     """Reconcile several surveys of one field into a single map.
 
-    Writes ``knowledge/fields/<slug>.md``. The shared-reference table is computed
-    from the bibliographies rather than generated, so the "core reading" list is
-    a fact about the surveys, not an opinion of the model.
+    Writes ``fields/<slug>.md`` under the knowledge folder of the collection.
+    The shared-reference table is computed from the bibliographies rather than
+    generated, so the "core reading" list is a fact about the surveys, not an
+    opinion of the model.
     """
-    from .knowledge import slugify
+    from .paths import knowledge_root, note_link, slugify
 
     settings = store.settings
     language = language or settings.default_language
@@ -722,16 +724,15 @@ def merge_surveys(
         ]
     )
 
+    path = knowledge_root(settings, collection) / "fields" / f"{slugify(field_name)}.md"
     lines = [f"# {field_name}", "", f"Synthesized from {len(blocks)} survey(s).", "", body, ""]
     lines += ["## Surveys", ""]
     for paper_id in survey_ids:
         meta = store.load_meta(paper_id)
         if meta:
             date = (meta.published or "")[:10]
-            lines.append(
-                f"- [{paper_id}](../../papers/{paper_id}/survey.md) {date} — "
-                f"{meta.display_title}"
-            )
+            target = note_link(settings, paper_id, "survey.md", path.parent)
+            lines.append(f"- [{paper_id}]({target}) {date} — {meta.display_title}")
     lines.append("")
 
     if shared:
@@ -755,7 +756,6 @@ def merge_surveys(
             )
         lines.append("")
 
-    path = settings.knowledge_dir / "fields" / f"{slugify(field_name)}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

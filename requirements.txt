@@ -22,6 +22,8 @@ fastapi>=0.110
 uvicorn>=0.29
 # Renders the Markdown notes as HTML in the browser.
 markdown-it-py>=3.0
+# Turns the formulas in those notes into MathML, which browsers draw natively.
+latex2mathml>=3.77
 # AES-CBC decryption of Feishu/WeCom callbacks.
 cryptography>=42.0
 

@@ -12,6 +12,8 @@ import httpx
 
 from ..config import FeishuConfig
 from .crypto import CryptoError, feishu_decrypt, feishu_signature
+from .imaging import RenderError, markdown_to_png, should_draw
+from .imaging import pages as _pages
 from .router import BotContext, split_message
 
 log = logging.getLogger(__name__)
@@ -64,18 +66,30 @@ class FeishuClient:
             "Content-Type": "application/json; charset=utf-8",
         }
 
+    def upload_image(self, png: bytes) -> str:
+        """Put a PNG in Feishu's store and return the key that addresses it."""
+        response = httpx.post(
+            f"{self.config.base_url}/im/v1/images",
+            data={"image_type": "message"},
+            files={"image": ("reply.png", png, "image/png")},
+            headers={"Authorization": f"Bearer {self.token()}"},
+            timeout=60,
+        )
+        data = _json_or_error(response)
+        if data.get("code") != 0:
+            raise FeishuError(f"image upload failed: {data.get('msg')}")
+        key = (data.get("data") or {}).get("image_key")
+        if not key:
+            raise FeishuError("image upload returned no image_key")
+        return key
+
     def send(self, receive_id: str, text: str, *, receive_id_type: str = "chat_id") -> None:
-        """Send a reply, split into chunks and rendered as a Markdown card."""
-        for piece in split_message(text, MESSAGE_LIMIT):
-            payload = {
-                "receive_id": receive_id,
-                "msg_type": "interactive",
-                "content": json.dumps(_markdown_card(piece), ensure_ascii=False),
-            }
+        """Send a reply as a picture when it has layout, as a card otherwise."""
+        for message in self._messages(text):
             response = httpx.post(
                 f"{self.config.base_url}/im/v1/messages",
                 params={"receive_id_type": receive_id_type},
-                json=payload,
+                json={"receive_id": receive_id, **message},
                 headers=self._headers(),
                 timeout=30,
             )
@@ -86,13 +100,10 @@ class FeishuClient:
 
     def reply(self, message_id: str, text: str) -> None:
         """Reply in-thread to a specific message."""
-        for piece in split_message(text, MESSAGE_LIMIT):
+        for message in self._messages(text):
             response = httpx.post(
                 f"{self.config.base_url}/im/v1/messages/{message_id}/reply",
-                json={
-                    "msg_type": "interactive",
-                    "content": json.dumps(_markdown_card(piece), ensure_ascii=False),
-                },
+                json=message,
                 headers=self._headers(),
                 timeout=30,
             )
@@ -100,6 +111,29 @@ class FeishuClient:
             if data.get("code") != 0:
                 log.error("feishu reply failed: %s", data)
                 raise FeishuError(f"reply failed: {data.get('msg')}")
+
+    def _messages(self, text: str) -> list[dict[str, Any]]:
+        """Turn one reply into the message payloads that carry it."""
+        if should_draw(text, self.config.send_as_image):
+            try:
+                return [
+                    {
+                        "msg_type": "image",
+                        "content": json.dumps({"image_key": self.upload_image(png)}),
+                    }
+                    for png in [markdown_to_png(piece) for piece in _pages(text)]
+                ]
+            except (RenderError, FeishuError, httpx.HTTPError) as exc:
+                # A picture is nicer, but an unformatted answer beats no answer.
+                log.warning("falling back to text: %s", exc)
+
+        return [
+            {
+                "msg_type": "interactive",
+                "content": json.dumps(_markdown_card(piece), ensure_ascii=False),
+            }
+            for piece in split_message(text, MESSAGE_LIMIT)
+        ]
 
 
 def _markdown_card(text: str) -> dict[str, Any]:
